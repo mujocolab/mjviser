@@ -298,7 +298,7 @@ class ViserMujocoScene:
     _center = self.mj_model.stat.center.copy()
     _extent = self.mj_model.stat.extent
     if camera_distance <= 0:
-      camera_distance = 1.5 * _extent
+      camera_distance = 3.0 * _extent
     _az_rad = np.deg2rad(camera_azimuth)
     _el_rad = np.deg2rad(camera_elevation)
     _camera_offset = (
@@ -345,9 +345,8 @@ class ViserMujocoScene:
       @self.server.on_client_connect
       def _(client: viser.ClientHandle) -> None:
         client.camera.fov = np.radians(slider_fov.value)
-        if self.camera_tracking_enabled:
-          client.camera.position = _camera_offset
-          client.camera.look_at = _center
+        client.camera.position = _camera_offset
+        client.camera.look_at = np.zeros(3) if self.camera_tracking_enabled else _center
 
   def create_overlay_gui(self) -> None:
     """Add overlay visualization controls into the current GUI context.
