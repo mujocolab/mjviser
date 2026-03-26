@@ -119,19 +119,6 @@ class ViserMujocoScene:
         self._tracked_body_id = body_id
         break
 
-  @staticmethod
-  def create(
-    server: viser.ViserServer,
-    mj_model: mujoco.MjModel,
-    num_envs: int,
-  ) -> ViserMujocoScene:
-    """Create and populate scene with geometry.
-
-    .. deprecated::
-        Use ``ViserMujocoScene(server, mj_model, num_envs)`` directly.
-    """
-    return ViserMujocoScene(server, mj_model, num_envs)
-
   def _sync_visibilities(self) -> None:
     """Synchronize all handle visibilities based on current flags."""
     for (
