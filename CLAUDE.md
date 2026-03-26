@@ -27,7 +27,13 @@ The `mjviser` CLI entry point (`__main__.py`) is a thin wrapper that loads a mod
 
 mjlab depends on mjviser. mjlab's `MjlabViserScene` subclasses `ViserMujocoScene` to add debug visualization (arrows, ghosts, spheres) and the mjwarp adapter. Debug visualization is an mjlab concept and does not belong in mjviser.
 
-When changing `ViserMujocoScene`'s public API or `create_visualization_gui`/`create_groups_gui` signatures, check that mjlab's bridge still works.
+When changing `ViserMujocoScene`'s public API or `create_visualization_gui`/`create_groups_gui` signatures, check that mjlab's `MjlabViserScene` subclass still works.
+
+# Tests
+
+- Use functions and fixtures, no classes.
+- Inline XML models for fixtures when possible (no external file dependencies).
+- Scene tests can construct a `ViserMujocoScene` with `viser.ViserServer(port=0)` without a browser.
 
 # Style
 
