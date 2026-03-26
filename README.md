@@ -1,30 +1,29 @@
 # mjviser
 
-Web-based MuJoCo viewer powered by [Viser](https://github.com/viser-project/viser).
+A web-based MuJoCo viewer built on [Viser](https://github.com/viser-project/viser).
 
 ## Quick start
 
-View any MuJoCo model instantly, no install needed:
+Run it directly with `uvx` (nothing to install):
 
 ```bash
 uvx mjviser path/to/model.xml
 ```
 
-Or install and use:
+Or `pip install mjviser` and run `mjviser path/to/model.xml`.
 
-```bash
-pip install mjviser
-mjviser path/to/model.xml
-```
-
-Fuzzy path matching finds models in the current directory tree:
+mjviser also does fuzzy path matching against the current directory:
 
 ```bash
 mjviser humanoid        # finds **/humanoid*.xml
 mjviser shadow_hand     # finds **/shadow_hand*.xml
 ```
 
-When there's a single match it's used automatically. Multiple matches show a numbered list to pick from.
+If [robot_descriptions](https://github.com/robot-descriptions/robot_descriptions.py) is available, you can load any of its 57 MuJoCo models by name:
+
+```bash
+uvx --with robot_descriptions mjviser go1
+```
 
 ## Python API
 
@@ -37,26 +36,23 @@ data = mujoco.MjData(model)
 Viewer(model, data).run()
 ```
 
-Open the printed URL in your browser. Most of the MuJoCo native viewer's functionality is available: simulation controls, joint and actuator sliders, contact and force visualization, camera tracking, keyframes, and more.
+Open the printed URL in your browser. You get most of what the native MuJoCo viewer offers: simulation controls, joint and actuator sliders, contact and force visualization, camera tracking, keyframes, and more.
 
 ## Extension points
 
-The `Viewer` accepts three callbacks for injecting custom logic:
+`Viewer` accepts three optional callbacks:
 
-- **`step_fn(model, data)`**: Called each simulation step. Use this to apply a controller, external forces, or any per-step logic. Defaults to `mujoco.mj_step`.
+- **`step_fn(model, data)`**: called each simulation step. Defaults to `mujoco.mj_step`.
+- **`render_fn(scene)`**: called each render frame. Defaults to `scene.update_from_mjdata(data)`.
+- **`reset_fn(model, data)`**: called on reset.
 
-- **`render_fn(scene)`**: Called each render frame. Use this to push custom state to the scene, add ghost overlays, or render debug geometry. Defaults to `scene.update_from_mjdata(data)`.
-
-- **`reset_fn(model, data)`**: Called on reset. Use this to restore custom simulation state.
-
-For full control over the loop, use `ViserMujocoScene` directly. The `server` is a standard [viser](https://viser.studio) server, so you can add custom GUI elements, scene overlays, or anything else viser supports.
+For full control, use `ViserMujocoScene` directly. The `server` is a standard [Viser](https://viser.studio) server, so you can add GUI elements, scene overlays, or anything else Viser supports.
 
 ```python
 server = viser.ViserServer()
 scene = ViserMujocoScene(server, model, num_envs=1)
 scene.create_visualization_gui()
 
-# Add your own GUI.
 with server.gui.add_folder("My Controls"):
     slider = server.gui.add_slider("Force", min=0, max=100, initial_value=0)
 
@@ -76,6 +72,6 @@ while True:
 
 ## Limitations
 
-- **No mouse interaction**: clicking/dragging bodies and keyboard callbacks are not yet supported; this requires upstream support in viser.
-- **Performance with many bodies**: models with lots of independently-moving bodies can be slower than the native MuJoCo viewer due to per-body websocket message overhead.
+- **No mouse interaction**: clicking/dragging bodies and keyboard callbacks require upstream Viser support.
+- **Many-body performance**: models with 60+ independently-moving bodies can be slower than the native viewer due to per-body websocket overhead.
 - **Cubemap textures**: approximated via per-vertex colors rather than true cubemap rendering.
