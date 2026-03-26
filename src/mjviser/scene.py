@@ -984,9 +984,10 @@ class ViserMujocoScene:
 
   def _clear_decor_handles(self) -> None:
     """Remove all decor handles and clear the cache."""
-    for handle in self._decor_handles.values():
-      handle.remove()
+    handles = list(self._decor_handles.values())
     self._decor_handles.clear()
+    for handle in handles:
+      handle.remove()
 
   def _hide_all_decor(self) -> None:
     """Hide all decor handles without removing them."""
