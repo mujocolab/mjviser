@@ -68,7 +68,10 @@ def test_batched_transform_tile():
   np.testing.assert_array_equal(pos[0], pos[1])
   np.testing.assert_array_equal(pos[0], pos[3])
 
-  server.stop()
+  try:
+    server.stop()
+  except RuntimeError:
+    pass
 
 
 # Update from mjdata--------------------------------------------------
