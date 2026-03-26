@@ -394,9 +394,9 @@ def _merge_meshes(
     transform[:3, 3] = pos
     mesh.apply_transform(transform)
 
-  if len(meshes) == 1:
-    return meshes[0]
-  return trimesh.util.concatenate(meshes)
+  result = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
+  result.merge_vertices()
+  return result
 
 
 def merge_geoms(mj_model: mujoco.MjModel, geom_ids: list[int]) -> trimesh.Trimesh:

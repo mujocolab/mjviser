@@ -156,11 +156,12 @@ class Viewer:
     dt = now - self._last_tick
     self._last_tick = now
 
+    stepped = False
     if not self._paused:
       with self._lock:
-        self._step_physics(dt)
+        stepped = self._step_physics(dt)
 
-    # Render at fixed frame rate.
+    # Render at fixed frame rate, but only when state changed.
     self._time_until_next_render -= dt
     if self._time_until_next_render > 0:
       return
@@ -169,18 +170,22 @@ class Viewer:
     if self._time_until_next_render < -_FRAME_TIME:
       self._time_until_next_render = 0.0
 
-    self._render()
+    if stepped or self.scene.needs_update:
+      self._render()
     self._stats_frames += 1
     self._update_stats()
 
-  def _step_physics(self, dt: float) -> None:
-    """Run physics steps for this frame's sim-time budget."""
+  def _step_physics(self, dt: float) -> bool:
+    """Run physics steps for this frame's sim-time budget.
+
+    Returns True if at least one step was taken.
+    """
     step_dt = self.model.opt.timestep
     self._budget += dt * self.speed
     self._was_capped = False
 
     if self._budget < step_dt:
-      return
+      return False
 
     deadline = time.perf_counter() + _FRAME_TIME
     hit_deadline = False
@@ -196,6 +201,7 @@ class Viewer:
     if hit_deadline:
       self._was_capped = self._budget >= step_dt
       self._budget = min(self._budget, step_dt)
+    return True
 
   def _update_stats(self) -> None:
     if self._paused:
@@ -335,7 +341,7 @@ class Viewer:
     with tabs.add_tab("Physics", icon=viser.Icon.ATOM):
       self._setup_physics_flags()
 
-  _MAX_SLIDERS: int = 50
+  _MAX_SLIDERS: int = 200
 
   def _setup_joint_sliders(self) -> None:
     """Add per-joint sliders for hinge and slide joints."""

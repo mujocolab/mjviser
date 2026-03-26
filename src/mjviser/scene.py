@@ -407,13 +407,14 @@ class ViserMujocoScene:
       step: float,
     ) -> None:
       """Add a scale slider that writes to a model field."""
-      lo_r, hi_r = round(lo, 3), round(hi, 3)
-      val = max(lo_r, min(hi_r, round(float(getattr(obj, attr)), 3)))
+      lo_r, hi_r = round(lo, 6), round(hi, 6)
+      step_r = round(step, 6) or round((hi - lo) / 200, 6)
+      val = max(lo_r, min(hi_r, round(float(getattr(obj, attr)), 6)))
       sl = self.server.gui.add_slider(
         label,
         min=lo_r,
         max=hi_r,
-        step=round(step, 3),
+        step=step_r,
         initial_value=val,
       )
 
