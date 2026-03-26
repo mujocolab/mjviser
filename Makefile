@@ -20,6 +20,7 @@ test:
 
 .PHONY: build
 build:
+	rm -rf dist
 	uv build
 	uv run --isolated --no-project --with dist/*.whl tests/smoke_test.py
 	uv run --isolated --no-project --with dist/*.tar.gz tests/smoke_test.py
