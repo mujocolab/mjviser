@@ -16,6 +16,16 @@ View any MuJoCo model from the command line:
 mjviser model.xml
 ```
 
+If the path doesn't exist as-is, mjviser searches the current directory tree for matching XML files:
+
+```bash
+cd ~/models
+mjviser humanoid        # finds **/humanoid*.xml
+mjviser shadow_hand     # finds **/shadow_hand*.xml
+```
+
+When there's a single match it's used automatically. Multiple matches show a numbered list to pick from.
+
 Or from Python:
 
 ```python
