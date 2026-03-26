@@ -259,7 +259,7 @@ def create_primitive_mesh(mj_model: mujoco.MjModel, geom_id: int) -> trimesh.Tri
 
 
 def _create_heightfield_mesh(mj_model: mujoco.MjModel, geom_id: int) -> trimesh.Trimesh:
-  """Create a colored heightfield mesh."""
+  """Create a heightfield mesh, using the material texture when available."""
   hfield_id = mj_model.geom_dataid[geom_id]
   nrow = mj_model.hfield_nrow[hfield_id]
   ncol = mj_model.hfield_ncol[hfield_id]
@@ -270,9 +270,9 @@ def _create_heightfield_mesh(mj_model: mujoco.MjModel, geom_id: int) -> trimesh.
     offset += mj_model.hfield_nrow[k] * mj_model.hfield_ncol[k]
   hfield = mj_model.hfield_data[offset : offset + nrow * ncol].reshape(nrow, ncol)
 
-  x = np.linspace(-sx, sx, ncol)
-  y = np.linspace(-sy, sy, nrow)
-  xx, yy = np.meshgrid(x, y)
+  x_arr = np.linspace(-sx, sx, ncol)
+  y_arr = np.linspace(-sy, sy, nrow)
+  xx, yy = np.meshgrid(x_arr, y_arr)
   zz = hfield * sz
 
   vertices = np.column_stack((xx.ravel(), yy.ravel(), zz.ravel()))
@@ -282,53 +282,30 @@ def _create_heightfield_mesh(mj_model: mujoco.MjModel, geom_id: int) -> trimesh.
   faces = np.column_stack(
     [i0, i0 + 1, i0 + ncol + 1, i0, i0 + ncol + 1, i0 + ncol]
   ).reshape(-1, 3)
+
+  # Try to use the material texture for coloring.
+  matid = mj_model.geom_matid[geom_id]
+  tex_image = None
+  if matid >= 0:
+    texid = _get_texture_id(mj_model, matid)
+    if texid >= 0:
+      tex_image = _extract_texture_image(mj_model, texid)
+
+  if tex_image is not None:
+    # UV-map the texture onto the heightfield grid.
+    u = np.linspace(0, 1, ncol)
+    v = np.linspace(0, 1, nrow)
+    uu, vv = np.meshgrid(u, v)
+    uv = np.column_stack((uu.ravel(), vv.ravel()))
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    material = trimesh.visual.material.PBRMaterial(baseColorTexture=tex_image)
+    mesh.visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
+    return mesh
+
+  # Fallback: color by height using the geom/material flat color.
   mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-
-  # Color by height using HSV.
-  zz_min, zz_max = zz.min(), zz.max()
-  normalized = (
-    (zz - zz_min) / (zz_max - zz_min) if zz_max > zz_min else np.full_like(zz, 0.5)
-  )
-
-  hue = 0.5 - normalized * 0.45
-  saturation = 0.6 - normalized * 0.2
-  value = 0.4 + normalized * 0.3
-
-  c = value * saturation
-  x = c * (1 - np.abs((hue * 6) % 2 - 1))
-  m = value - c
-
-  hue_sector = (hue * 6).astype(int) % 6
-  r = np.zeros_like(hue)
-  g = np.zeros_like(hue)
-  b = np.zeros_like(hue)
-
-  for sector, rc, gc, bc in [
-    (0, c, x, 0),
-    (1, x, c, 0),
-    (2, 0, c, x),
-    (3, 0, x, c),
-    (4, x, 0, c),
-    (5, c, 0, x),
-  ]:
-    mask = hue_sector == sector
-    r[mask] = rc[mask] if isinstance(rc, np.ndarray) else rc
-    g[mask] = gc[mask] if isinstance(gc, np.ndarray) else gc
-    b[mask] = bc[mask] if isinstance(bc, np.ndarray) else bc
-
-  r += m
-  g += m
-  b += m
-
-  vertex_colors = np.column_stack(
-    [
-      (np.clip(r, 0, 1) * 255).astype(np.uint8).ravel(),
-      (np.clip(g, 0, 1) * 255).astype(np.uint8).ravel(),
-      (np.clip(b, 0, 1) * 255).astype(np.uint8).ravel(),
-      np.full(vertices.shape[0], 255, dtype=np.uint8),
-    ]
-  )
-
+  rgba = _resolve_flat_rgba(mj_model, geom_id)
+  vertex_colors = np.tile(rgba, (vertices.shape[0], 1))
   mesh.visual = trimesh.visual.ColorVisuals(mesh=mesh, vertex_colors=vertex_colors)
   return mesh
 
@@ -395,18 +372,17 @@ def _can_merge_vertices(mesh: trimesh.Trimesh) -> bool:
   vc = mesh.visual.vertex_colors
   if vc is None or len(set(map(tuple, vc))) <= 1:
     return True
-  # Check a sample of co-located vertices for conflicting colors.
+  # Check whether co-located vertices carry conflicting colors.
   rounded = np.round(mesh.vertices, decimals=6)
   _, inverse = np.unique(rounded, axis=0, return_inverse=True)
-  # Group colors by unique position.  If any position maps to multiple
-  # colors, merging would destroy information.
-  pos_color = np.empty(len(inverse), dtype=np.uint64)
-  for i in range(len(inverse)):
-    r, g, b, a = vc[i]
-    pos_color[i] = (int(r) << 24) | (int(g) << 16) | (int(b) << 8) | int(a)
-  pairs = np.column_stack([inverse, pos_color])
-  unique_pairs = np.unique(pairs, axis=0)
-  return len(unique_pairs) == len(np.unique(inverse))
+  color_hash = (
+    vc[:, 0].astype(np.uint64) << 24
+    | vc[:, 1].astype(np.uint64) << 16
+    | vc[:, 2].astype(np.uint64) << 8
+    | vc[:, 3].astype(np.uint64)
+  )
+  pairs = np.column_stack([inverse, color_hash])
+  return len(np.unique(pairs, axis=0)) == len(np.unique(inverse))
 
 
 def _merge_meshes(

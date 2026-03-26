@@ -1,6 +1,6 @@
 # mjviser
 
-Web-based MuJoCo viewer powered by [viser](https://github.com/viser-project/viser).
+Web-based MuJoCo viewer powered by [Viser](https://github.com/viser-project/viser).
 
 ## Quick start
 
@@ -37,7 +37,7 @@ data = mujoco.MjData(model)
 Viewer(model, data).run()
 ```
 
-Open the printed URL in your browser. You get pause/resume, speed controls, single-stepping, reset, keyframe selection, joint sliders, and actuator sliders out of the box.
+Open the printed URL in your browser. Most of the MuJoCo native viewer's functionality is available: simulation controls, joint and actuator sliders, contact and force visualization, camera tracking, keyframes, and more.
 
 ## Extension points
 
@@ -73,3 +73,9 @@ while True:
 - `multi_env.py`: 4 humanoids in parallel via mujoco-warp
 - `ghost_overlay.py`: custom `render_fn` that overlays a time-delayed ghost
 - `motion_playback.py`: recorded trajectory with timeline scrubber, speed control, and contact replay
+
+## Limitations
+
+- **No mouse interaction**: clicking/dragging bodies and keyboard callbacks are not yet supported; this requires upstream support in viser.
+- **Performance with many bodies**: models with lots of independently-moving bodies can be slower than the native MuJoCo viewer due to per-body websocket message overhead.
+- **Cubemap textures**: approximated via per-vertex colors rather than true cubemap rendering.
