@@ -367,7 +367,7 @@ class Viewer:
     if not joints:
       return
 
-    with self._server.gui.add_folder("Joints"):
+    with self._server.gui.add_folder("Joints", expand_by_default=False):
       for jnt_id, name, lo, hi in joints:
         qpos_adr = int(self.model.jnt_qposadr[jnt_id])
         val = float(np.clip(self.data.qpos[qpos_adr], lo, hi))
