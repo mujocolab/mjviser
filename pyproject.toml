@@ -6,6 +6,7 @@ build-backend = "uv_build"
 name = "mjviser"
 version = "0.0.1"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 readme = "README.md"
 authors = [
   {name = "The MjLab Developers"},
@@ -34,6 +35,10 @@ dependencies = [
   "viser>=1.0.24",
   "Pillow",
 ]
+
+[project.urls]
+Source = "https://github.com/mujocolab/mjviser"
+"Bug Reports" = "https://github.com/mujocolab/mjviser/issues"
 
 [project.scripts]
 mjviser = "mjviser.__main__:main"

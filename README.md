@@ -1,32 +1,32 @@
 # mjviser
 
-Web-based MuJoCo viewer powered by [viser](https://github.com/nerfstudio-project/viser).
-
-## Install
-
-```bash
-pip install mjviser
-```
+Web-based MuJoCo viewer powered by [viser](https://github.com/viser-project/viser).
 
 ## Quick start
 
-View any MuJoCo model from the command line:
+View any MuJoCo model instantly, no install needed:
 
 ```bash
-mjviser model.xml
+uvx mjviser path/to/model.xml
 ```
 
-If the path doesn't exist as-is, mjviser searches the current directory tree for matching XML files:
+Or install and use:
 
 ```bash
-cd ~/models
+pip install mjviser
+mjviser path/to/model.xml
+```
+
+Fuzzy path matching finds models in the current directory tree:
+
+```bash
 mjviser humanoid        # finds **/humanoid*.xml
 mjviser shadow_hand     # finds **/shadow_hand*.xml
 ```
 
 When there's a single match it's used automatically. Multiple matches show a numbered list to pick from.
 
-Or from Python:
+## Python API
 
 ```python
 import mujoco
