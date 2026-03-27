@@ -25,6 +25,7 @@ def main() -> None:
 
   server = viser.ViserServer()
   scene = ViserMujocoScene(server, model, num_envs=1)
+
   scene.create_visualization_gui()
 
   print("Running simulation. Press Ctrl+C to stop.")

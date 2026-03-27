@@ -579,6 +579,35 @@ class ViserMujocoScene:
             self._clear_decor_handles()
             self.request_update()
 
+  def create_visualization_gui(
+    self,
+    camera_distance: float = -1.0,
+    camera_azimuth: float = 120.0,
+    camera_elevation: float = 20.0,
+  ) -> viser.GuiTabGroupHandle:
+    """Add scene, overlay, and group controls in a tabbed layout.
+
+    Returns the tab group so callers can append additional tabs.
+
+    Args:
+        camera_distance: Default camera distance. If negative, derived
+            from model extent.
+        camera_azimuth: Default camera azimuth angle in degrees.
+        camera_elevation: Default camera elevation angle in degrees.
+    """
+    tabs = self.server.gui.add_tab_group()
+    with tabs.add_tab("Scene", icon=viser.Icon.VIDEO):
+      self.create_scene_gui(
+        camera_distance=camera_distance,
+        camera_azimuth=camera_azimuth,
+        camera_elevation=camera_elevation,
+      )
+    with tabs.add_tab("Visualization", icon=viser.Icon.EYE):
+      self.create_overlay_gui()
+    with tabs.add_tab("Groups", icon=viser.Icon.LAYERS_INTERSECT):
+      self.create_groups_gui()
+    return tabs
+
   def update_from_arrays(
     self,
     body_xpos: np.ndarray,

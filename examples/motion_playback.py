@@ -67,10 +67,9 @@ def main() -> None:
   accumulator = [0.0]
   needs_render = [True]
 
-  # GUI.
-  scene.create_visualization_gui()
-
-  with server.gui.add_folder("Playback"):
+  # GUI: standard scene controls plus a Playback tab.
+  tabs = scene.create_visualization_gui()
+  with tabs.add_tab("Playback", icon=viser.Icon.PLAYER_PLAY):
     timeline = server.gui.add_slider(
       "Frame",
       min=0,
