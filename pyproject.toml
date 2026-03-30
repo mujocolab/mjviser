@@ -32,7 +32,7 @@ dependencies = [
   "mujoco>=3.6.0",
   "numpy",
   "trimesh>=4.8.3",
-  "viser>=1.0.24",
+  "viser>=1.0.26",
   "Pillow",
 ]
 
