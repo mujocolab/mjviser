@@ -84,5 +84,3 @@ Thanks to [Matija Kecman](https://github.com/okmatija) for early feedback and su
 ## Limitations
 
 - **No mouse interaction**: clicking/dragging bodies and keyboard callbacks require upstream Viser support.
-- **Many-body performance**: models with 60+ independently-moving bodies can be slower than the native viewer due to per-body websocket overhead.
-- **Cubemap textures**: approximated via per-vertex colors rather than true cubemap rendering.
