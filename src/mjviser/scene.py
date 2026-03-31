@@ -145,6 +145,7 @@ class ViserMujocoScene:
     self._hull_opacity: float = 0.5
     self._show_convex_hull: bool = False
     self._hull_hide_meshes: bool = False
+    self._autoconnect_hide_meshes: bool = False
 
     # Visualization settings.
     self.env_idx = 0
@@ -305,6 +306,11 @@ class ViserMujocoScene:
     hidden_bodies: set[int] = set()
     if self._show_convex_hull and self._hull_hide_meshes:
       hidden_bodies = set(self._hull_body_meshes.keys())
+    if (
+      self._mjv_option.flags[mujoco.mjtVisFlag.mjVIS_AUTOCONNECT]
+      and self._autoconnect_hide_meshes
+    ):
+      hidden_bodies |= set(range(self.mj_model.nbody))
 
     for mg in self._mesh_groups:
       visible = mg.group_id < 6 and self.geom_groups_visible[mg.group_id]
@@ -585,6 +591,24 @@ class ViserMujocoScene:
       _scale_slider("Length", _vis, "actuatorlength", 0.1, 5.0, 0.05)
       _scale_slider("Width", _vis, "actuatorwidth", 0.01, 1.0, 0.01)
 
+    # -- Auto-connect ----------------------------------------------------
+
+    with self.server.gui.add_folder("Auto-connect"):
+      _vis_flag_cb(int(mujoco.mjtVisFlag.mjVIS_AUTOCONNECT))
+      autoconnect_hide_meshes = self.server.gui.add_checkbox(
+        "Hide meshes", initial_value=False
+      )
+      _color_controls("connect")
+      _scale_slider("Width", _vis, "connect", 0.01, 1.0, 0.01)
+
+      @autoconnect_hide_meshes.on_update
+      def _(_) -> None:
+        def _mutate() -> None:
+          self._autoconnect_hide_meshes = autoconnect_hide_meshes.value
+          self._sync_visibilities()
+
+        self._apply_visualization_change(_mutate)
+
     # -- Convex hull ------------------------------------------------------
 
     with self.server.gui.add_folder("Convex hull"):
@@ -636,7 +660,6 @@ class ViserMujocoScene:
       ("Tendons", _tendon_flag, self.mj_model.ntendon > 0),
       ("COM", int(mujoco.mjtVisFlag.mjVIS_COM), False),
       ("Constraints", int(mujoco.mjtVisFlag.mjVIS_CONSTRAINT), False),
-      ("Auto-connect", int(mujoco.mjtVisFlag.mjVIS_AUTOCONNECT), False),
     ]
 
     for label, flag_idx, initial in _simple_flags:
@@ -1289,8 +1312,7 @@ class ViserMujocoScene:
     )
 
     # Group geoms by (type, is_tendon). Tendons are keyed separately so
-    # they get cylinder meshes (non-uniform scaling distorts capsule caps)
-    # while other capsules (e.g. auto-connect) use real capsule meshes.
+    # connector-style capsules can be rendered with cylinders instead.
     geoms_by_key: dict[tuple[int, bool], list[int]] = defaultdict(list)
     for i in range(self._mjv_scene.ngeom):
       g = self._mjv_scene.geoms[i]
@@ -1306,6 +1328,44 @@ class ViserMujocoScene:
     all_head_scales: list[np.ndarray] = []
     all_head_colors: list[np.ndarray] = []
     all_head_opacities: list[float] = []
+
+    def _update_simple_handle(
+      key: tuple[int, bool],
+      path: str,
+      mesh_type: int,
+      positions: np.ndarray,
+      orientations: np.ndarray,
+      scales: np.ndarray,
+      colors: np.ndarray,
+      opacities: np.ndarray,
+    ) -> None:
+      active_keys.add(key)
+      batched_opacities = None if np.all(opacities == 1.0) else opacities
+      handle = self._decor_handles.get(key)
+      if handle is not None:
+        handle.batched_positions = positions
+        handle.batched_wxyzs = orientations
+        handle.batched_scales = scales
+        handle.batched_colors = colors
+        handle.batched_opacities = batched_opacities
+        handle.visible = True
+        return
+
+      unit = _get_unit_mesh(mesh_type)
+      handle = self.server.scene.add_batched_meshes_simple(
+        path,
+        unit.vertices,
+        unit.faces,
+        batched_wxyzs=orientations,
+        batched_positions=positions,
+        batched_scales=scales,
+        batched_colors=colors,
+        batched_opacities=batched_opacities,
+        lod="off",
+        cast_shadow=False,
+        receive_shadow=False,
+      )
+      self._decor_handles[key] = handle
 
     for (geom_type, is_tendon), indices in geoms_by_key.items():
       n = len(indices)
@@ -1336,7 +1396,6 @@ class ViserMujocoScene:
 
         # Map mjvGeom size to unit-mesh scale.
         if geom_type in (_CYLINDER, _CAPSULE):
-          # Zero-length capsule = sphere (COM dot in auto-connect).
           height = max(size[2] * 2, size[0])
           scales[j] = [size[0], size[0], height]
         elif geom_type in _ARROWS:
@@ -1357,71 +1416,31 @@ class ViserMujocoScene:
         else:
           scales[j] = size
 
-      # Tendons use cylinders; other capsules use real capsule meshes.
-      mesh_type = _CYLINDER if is_tendon else geom_type
+      mesh_type = _CYLINDER if is_tendon or geom_type == _CAPSULE else geom_type
       key = (geom_type, is_tendon)
-      batched_opacities = None if np.all(opacities == 1.0) else opacities
-
-      handle = self._decor_handles.get(key)
-      if handle is not None:
-        handle.batched_positions = positions
-        handle.batched_wxyzs = orientations
-        handle.batched_scales = scales
-        handle.batched_colors = colors
-        handle.batched_opacities = batched_opacities
-        handle.visible = True
-      else:
-        unit = _get_unit_mesh(mesh_type)
-        handle = self.server.scene.add_batched_meshes_simple(
-          f"/decor/{geom_type}_{is_tendon}",
-          unit.vertices,
-          unit.faces,
-          batched_wxyzs=orientations,
-          batched_positions=positions,
-          batched_scales=scales,
-          batched_colors=colors,
-          batched_opacities=batched_opacities,
-          lod="off",
-          cast_shadow=False,
-          receive_shadow=False,
-        )
-        self._decor_handles[key] = handle
+      _update_simple_handle(
+        key,
+        f"/decor/{geom_type}_{is_tendon}",
+        mesh_type,
+        positions,
+        orientations,
+        scales,
+        colors,
+        opacities,
+      )
 
     # Create arrow heads as a single combined handle.
     if all_head_positions:
-      head_key = (_ARROW_HEAD, False)
-      active_keys.add(head_key)
-      h_pos = np.array(all_head_positions)
-      h_ori = np.array(all_head_orientations)
-      h_scl = np.array(all_head_scales)
-      h_col = np.array(all_head_colors)
-      h_opa = np.array(all_head_opacities, dtype=np.float32)
-      h_batched_opacities = None if np.all(h_opa == 1.0) else h_opa
-
-      h_handle = self._decor_handles.get(head_key)
-      if h_handle is not None:
-        h_handle.batched_positions = h_pos
-        h_handle.batched_wxyzs = h_ori
-        h_handle.batched_scales = h_scl
-        h_handle.batched_colors = h_col
-        h_handle.batched_opacities = h_batched_opacities
-        h_handle.visible = True
-      else:
-        unit = _get_unit_mesh(_ARROW_HEAD)
-        h_handle = self.server.scene.add_batched_meshes_simple(
-          "/decor/arrow_heads",
-          unit.vertices,
-          unit.faces,
-          batched_wxyzs=h_ori,
-          batched_positions=h_pos,
-          batched_scales=h_scl,
-          batched_colors=h_col,
-          batched_opacities=h_batched_opacities,
-          lod="off",
-          cast_shadow=False,
-          receive_shadow=False,
-        )
-        self._decor_handles[head_key] = h_handle
+      _update_simple_handle(
+        (_ARROW_HEAD, False),
+        "/decor/arrow_heads",
+        _ARROW_HEAD,
+        np.array(all_head_positions),
+        np.array(all_head_orientations),
+        np.array(all_head_scales),
+        np.array(all_head_colors),
+        np.array(all_head_opacities, dtype=np.float32),
+      )
 
     # Hide handles for types not present this frame.
     for key, handle in self._decor_handles.items():
