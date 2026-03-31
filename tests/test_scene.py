@@ -48,7 +48,7 @@ def test_batched_transform_no_tile(scene):
   np.testing.assert_array_equal(pos, positions[..., 1, :])
 
 
-def test_batched_transform_tile():
+def test_batched_transform_slice_single():
   server = viser.ViserServer(port=0)
   xml = """
   <mujoco>
@@ -65,10 +65,9 @@ def test_batched_transform_tile():
   offset = np.zeros(3)
 
   pos, quat = scene._batched_transform(positions, quats, 1, 0, offset, True)
-  assert pos.shape == (4, 3)
-  # All rows should be the same (tiled from env 0).
-  np.testing.assert_array_equal(pos[0], pos[1])
-  np.testing.assert_array_equal(pos[0], pos[3])
+  assert pos.shape == (1, 3)
+  # Should contain only the selected env's data.
+  np.testing.assert_array_equal(pos[0], positions[0, 1])
 
   try:
     server.stop()

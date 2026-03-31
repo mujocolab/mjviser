@@ -725,7 +725,7 @@ class ViserMujocoScene:
       self._last_mj_data = mj_data
 
     self.fixed_bodies_frame.position = scene_offset
-    tile = self.show_only_selected and self.num_envs > 1
+    slice_single = self.show_only_selected and self.num_envs > 1
     with self.server.atomic():
       body_xquat = vtf.SO3.from_matrix(body_xmat).wxyz
       for mg in self._mesh_groups:
@@ -733,11 +733,11 @@ class ViserMujocoScene:
           continue
         if mg.mocap_ids is not None:
           pos, quat = self._batched_transform_group(
-            mocap_pos, mocap_quat, mg.mocap_ids, env_idx, scene_offset, tile
+            mocap_pos, mocap_quat, mg.mocap_ids, env_idx, scene_offset, slice_single
           )
         else:
           pos, quat = self._batched_transform_group(
-            body_xpos, body_xquat, mg.body_ids, env_idx, scene_offset, tile
+            body_xpos, body_xquat, mg.body_ids, env_idx, scene_offset, slice_single
           )
         mg.handle.batched_positions = pos
         mg.handle.batched_wxyzs = quat
@@ -746,7 +746,7 @@ class ViserMujocoScene:
         if not handle.visible:
           continue
         pos, quat = self._batched_transform(
-          body_xpos, body_xquat, body_id, env_idx, scene_offset, tile
+          body_xpos, body_xquat, body_id, env_idx, scene_offset, slice_single
         )
         handle.batched_positions = pos
         handle.batched_wxyzs = quat
@@ -765,12 +765,12 @@ class ViserMujocoScene:
     idx: int,
     env_idx: int,
     scene_offset: np.ndarray,
-    tile: bool,
+    slice_single: bool,
   ) -> tuple[np.ndarray, np.ndarray]:
     """Return (batched_positions, batched_wxyzs) for a single body."""
-    if tile:
-      pos = np.tile((positions[env_idx, idx] + scene_offset)[None], (self.num_envs, 1))
-      quat = np.tile(quats[env_idx, idx][None], (self.num_envs, 1))
+    if slice_single:
+      pos = positions[env_idx : env_idx + 1, idx] + scene_offset
+      quat = quats[env_idx : env_idx + 1, idx]
     else:
       pos = positions[..., idx, :] + scene_offset
       quat = quats[..., idx, :]
@@ -783,18 +783,17 @@ class ViserMujocoScene:
     ids: np.ndarray,
     env_idx: int,
     scene_offset: np.ndarray,
-    tile: bool,
+    slice_single: bool,
   ) -> tuple[np.ndarray, np.ndarray]:
     """Return (batched_positions, batched_wxyzs) for a group of bodies.
 
     Gathers transforms for all body IDs in ``ids`` and flattens
     the result to ``(num_envs * len(ids), 3/4)``.
     """
-    if tile:
-      # Show only selected env, tiled for all envs.
-      # positions[env_idx, ids] → (N, 3)
-      pos = np.tile(positions[env_idx, ids] + scene_offset, (self.num_envs, 1))
-      quat = np.tile(quats[env_idx, ids], (self.num_envs, 1))
+    if slice_single:
+      # Show only selected env.
+      pos = positions[env_idx : env_idx + 1, ids].reshape(-1, 3) + scene_offset
+      quat = quats[env_idx : env_idx + 1, ids].reshape(-1, 4)
     else:
       # positions[:, ids, :] → (num_envs, N, 3) → (num_envs * N, 3)
       pos = (positions[:, ids, :] + scene_offset).reshape(-1, 3)
