@@ -15,6 +15,7 @@ from mjviser.conversions import (
   get_body_name,
   is_fixed_body,
   merge_geoms,
+  merge_geoms_hull,
   merge_sites,
   mujoco_mesh_to_trimesh,
   rotation_matrix_from_vectors,
@@ -144,6 +145,13 @@ def test_merge_geoms(simple_model):
   mesh = merge_geoms(simple_model, [1, 2])
   assert isinstance(mesh, trimesh.Trimesh)
   assert len(mesh.vertices) > 0
+
+
+def test_merge_geoms_hull(cubemap_model):
+  mesh = merge_geoms_hull(cubemap_model, [0])
+  assert isinstance(mesh, trimesh.Trimesh)
+  assert len(mesh.vertices) > 0
+  assert len(mesh.faces) > 0
 
 
 def test_merge_sites(simple_model):

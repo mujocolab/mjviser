@@ -5,6 +5,43 @@ import viser
 from mjviser import ViserMujocoScene
 from mjviser.conversions import is_fixed_body
 
+_MESH_BODY_XML = """
+<mujoco>
+  <asset>
+    <mesh name="cube"
+          vertex="-1 -1 -1  1 -1 -1  1 1 -1  -1 1 -1
+                  -1 -1 1   1 -1 1   1 1 1   -1 1 1"
+          face="0 3 2  0 2 1  4 5 6  4 6 7
+                0 1 5  0 5 4  2 3 7  2 7 6
+                0 4 7  0 7 3  1 2 6  1 6 5"/>
+  </asset>
+  <worldbody>
+    <body name="mesh_body" pos="0 0 1">
+      <joint type="free"/>
+      <geom type="mesh" mesh="cube"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+_FIXED_MESH_BODY_XML = """
+<mujoco>
+  <asset>
+    <mesh name="cube"
+          vertex="-1 -1 -1  1 -1 -1  1 1 -1  -1 1 -1
+                  -1 -1 1   1 -1 1   1 1 1   -1 1 1"
+          face="0 3 2  0 2 1  4 5 6  4 6 7
+                0 1 5  0 5 4  2 3 7  2 7 6
+                0 4 7  0 7 3  1 2 6  1 6 5"/>
+  </asset>
+  <worldbody>
+    <body name="fixed_mesh_body" pos="0 0 1">
+      <geom type="mesh" mesh="cube"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
 # Construction--------------------------------------------------------
 
 
@@ -141,3 +178,83 @@ def test_any_decor_visible(scene):
   scene.show_contact_points = False
   scene.frame_mode = "Geom"
   assert scene._any_decor_visible() is True
+
+
+def test_convex_hull_handles_follow_visibility():
+  server = viser.ViserServer(port=0)
+  model = mujoco.MjModel.from_xml_string(_MESH_BODY_XML)
+  scene = ViserMujocoScene(server, model, num_envs=1)
+
+  assert 1 in scene._hull_body_meshes
+  assert len(scene._hull_dynamic_handles) == 1
+
+  hull_handle, body_id = scene._hull_dynamic_handles[0]
+  assert body_id == 1
+  assert hull_handle.visible is False
+  assert scene._mesh_groups[0].handle.visible is True
+
+  scene.show_convex_hull = True
+  assert hull_handle.visible is True
+
+  scene._hull_hide_meshes = True
+  scene._sync_visibilities()
+  assert scene._mesh_groups[0].handle.visible is False
+
+  scene.show_convex_hull = False
+  assert hull_handle.visible is False
+  assert scene._mesh_groups[0].handle.visible is True
+
+  try:
+    server.stop()
+  except RuntimeError:
+    pass
+
+
+def test_convex_hull_fixed_body_visibility():
+  server = viser.ViserServer(port=0)
+  model = mujoco.MjModel.from_xml_string(_FIXED_MESH_BODY_XML)
+  scene = ViserMujocoScene(server, model, num_envs=1)
+
+  assert 1 in scene._hull_fixed_handles
+  hull_handle = scene._hull_fixed_handles[1]
+  fixed_geom_handle = next(iter(scene._fixed_geom_handles.values()))
+
+  assert hull_handle.visible is False
+  assert fixed_geom_handle.visible is True
+
+  scene.show_convex_hull = True
+  scene._hull_hide_meshes = True
+  scene._sync_visibilities()
+
+  assert hull_handle.visible is True
+  assert fixed_geom_handle.visible is False
+
+  scene.show_convex_hull = False
+  assert hull_handle.visible is False
+  assert fixed_geom_handle.visible is True
+
+  try:
+    server.stop()
+  except RuntimeError:
+    pass
+
+
+def test_convex_hull_dynamic_handle_updates_with_mjdata():
+  server = viser.ViserServer(port=0)
+  model = mujoco.MjModel.from_xml_string(_MESH_BODY_XML)
+  data = mujoco.MjData(model)
+  data.qpos[:3] = [0.5, -0.25, 1.5]
+  mujoco.mj_forward(model, data)
+
+  scene = ViserMujocoScene(server, model, num_envs=1)
+  scene.camera_tracking_enabled = False
+  scene.show_convex_hull = True
+  scene.update_from_mjdata(data)
+
+  hull_handle, body_id = scene._hull_dynamic_handles[0]
+  np.testing.assert_allclose(hull_handle.batched_positions[0], data.xpos[body_id])
+
+  try:
+    server.stop()
+  except RuntimeError:
+    pass
