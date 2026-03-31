@@ -304,13 +304,14 @@ class Viewer:
           key_names.append(name if name else f"key_{i}")
 
         with self._server.gui.add_folder("Keyframes"):
-          options = ["(none)", *key_names]
-          key_dropdown = self._server.gui.add_dropdown("Key", options=options)
+          key_dropdown = self._server.gui.add_dropdown(
+            "Key", options=key_names, initial_value=key_names[0]
+          )
+          load_btn = self._server.gui.add_button(
+            "Load", icon=viser.Icon.PLAYER_TRACK_NEXT
+          )
 
-          @key_dropdown.on_update
-          def _(_) -> None:
-            if key_dropdown.value == "(none)":
-              return
+          def _load_keyframe() -> None:
             idx = key_names.index(key_dropdown.value)
             with self._lock:
               mujoco.mj_resetDataKeyframe(self.model, self.data, idx)
@@ -321,6 +322,14 @@ class Viewer:
               self._budget = 0.0
               self._render()
               self._update_status_display()
+
+          @load_btn.on_click
+          def _(_) -> None:
+            _load_keyframe()
+
+          @key_dropdown.on_update
+          def _(_) -> None:
+            _load_keyframe()
 
       # Scene controls (camera, environment).
       with self._server.gui.add_folder("Scene"):
