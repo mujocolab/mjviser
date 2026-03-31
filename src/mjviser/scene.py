@@ -139,6 +139,7 @@ class ViserMujocoScene:
     self._update_lock = RLock()
     self._refresh_handler: Callable[[], None] | None = None
     self._hull_body_meshes: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    self._hull_mesh_bodies: set[int] = set()
     self._hull_fixed_handles: dict[int, viser.BatchedMeshHandle] = {}
     self._hull_dynamic_handles: list[tuple[viser.BatchedMeshHandle, int]] = []
     self._hull_color: tuple[int, int, int] = (230, 230, 255)
@@ -305,7 +306,7 @@ class ViserMujocoScene:
     """Synchronize all handle visibilities based on current flags."""
     hidden_bodies: set[int] = set()
     if self._show_convex_hull and self._hull_hide_meshes:
-      hidden_bodies = set(self._hull_body_meshes.keys())
+      hidden_bodies = self._hull_mesh_bodies
     if (
       self._mjv_option.flags[mujoco.mjtVisFlag.mjVIS_AUTOCONNECT]
       and self._autoconnect_hide_meshes
@@ -1221,6 +1222,8 @@ class ViserMujocoScene:
         continue
       body_id = int(self.mj_model.geom_bodyid[geom_id])
       body_geoms.setdefault(body_id, []).append(geom_id)
+
+    self._hull_mesh_bodies = set(body_geoms.keys())
 
     for body_id, geom_ids in body_geoms.items():
       hull_mesh = merge_geoms_hull(self.mj_model, geom_ids)
