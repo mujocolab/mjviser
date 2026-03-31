@@ -79,7 +79,8 @@ class Viewer:
 
     # Speed.
     self._speed_idx = _SPEEDS.index(1.0)
-    self._joint_sliders: list = []
+    self._joint_sliders: list = []  # [(slider, qpos_adr), ...]
+    self._actuator_sliders: list = []  # [(slider, act_id), ...]
 
     # State.
     self._paused = False
@@ -127,6 +128,15 @@ class Viewer:
       self.data.qpos[qpos_adr] = value
       mujoco.mj_forward(self.model, self.data)
       self._render()
+
+  def _sync_sliders(self) -> None:
+    """Update joint and actuator slider values from current data."""
+    for slider, qpos_adr in self._joint_sliders:
+      val = float(np.clip(self.data.qpos[qpos_adr], slider.min, slider.max))
+      slider.value = round(val, 3)
+    for slider, act_id in self._actuator_sliders:
+      val = float(np.clip(self.data.ctrl[act_id], slider.min, slider.max))
+      slider.value = round(val, 3)
 
   def _reset(self) -> None:
     """Reset the simulation."""
@@ -269,7 +279,9 @@ class Viewer:
         pause_btn.icon = (
           viser.Icon.PLAYER_PAUSE if not self._paused else viser.Icon.PLAYER_PLAY
         )
-        for sl in self._joint_sliders:
+        for sl, _ in self._joint_sliders:
+          sl.disabled = not self._paused
+        for sl, _ in self._actuator_sliders:
           sl.disabled = not self._paused
         self._update_status_display()
 
@@ -294,6 +306,7 @@ class Viewer:
           self._budget = 0.0
           self._render()
           self._update_status_display()
+        self._sync_sliders()
 
       speed_btns = self._server.gui.add_button_group(
         "Speed", options=["Slower", "1x", "Faster"]
@@ -335,6 +348,7 @@ class Viewer:
               self._budget = 0.0
               self._render()
               self._update_status_display()
+            self._sync_sliders()
 
           @load_btn.on_click
           def _(_) -> None:
@@ -407,7 +421,7 @@ class Viewer:
           initial_value=round(val, 3),
           disabled=not self._paused,
         )
-        self._joint_sliders.append(slider)
+        self._joint_sliders.append((slider, qpos_adr))
 
         def _on_update(_, _adr=qpos_adr, _sl=slider) -> None:
           self._set_joint_qpos(_adr, _sl.value)
@@ -448,6 +462,8 @@ class Viewer:
           step=round((hi - lo) / 200, 4),
           initial_value=round(val, 3),
         )
+
+        self._actuator_sliders.append((slider, act_id))
 
         def _on_update(_, _id=act_id, _sl=slider) -> None:
           with self._lock:
