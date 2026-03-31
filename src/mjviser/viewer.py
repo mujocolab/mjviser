@@ -75,6 +75,7 @@ class Viewer:
     self._server = server or viser.ViserServer()
     self.scene = ViserMujocoScene(self._server, model, num_envs=num_envs)
     self._lock = Lock()
+    self.scene.set_refresh_handler(self._refresh_scene_from_gui)
 
     # Speed.
     self._speed_idx = _SPEEDS.index(1.0)
@@ -114,6 +115,18 @@ class Viewer:
       self._render_fn(self.scene)
     else:
       self.scene.update_from_mjdata(self.data)
+
+  def _refresh_scene_from_gui(self) -> None:
+    """Refresh cached visualization state under the simulation lock."""
+    with self._lock:
+      self._render()
+
+  def _set_joint_qpos(self, qpos_adr: int, value: float) -> None:
+    """Set one scalar joint position and refresh the scene immediately."""
+    with self._lock:
+      self.data.qpos[qpos_adr] = value
+      mujoco.mj_forward(self.model, self.data)
+      self._render()
 
   def _reset(self) -> None:
     """Reset the simulation."""
@@ -397,10 +410,7 @@ class Viewer:
         self._joint_sliders.append(slider)
 
         def _on_update(_, _adr=qpos_adr, _sl=slider) -> None:
-          with self._lock:
-            self.data.qpos[_adr] = _sl.value
-            mujoco.mj_forward(self.model, self.data)
-            self._render()
+          self._set_joint_qpos(_adr, _sl.value)
 
         slider.on_update(_on_update)
 
