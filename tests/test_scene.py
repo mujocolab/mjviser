@@ -42,6 +42,20 @@ _FIXED_MESH_BODY_XML = """
 </mujoco>
 """
 
+_ACTUATED_HINGE_XML = """
+<mujoco>
+  <worldbody>
+    <body name="arm" pos="0 0 1">
+      <joint name="hinge" type="hinge" axis="0 0 1"/>
+      <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.04"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor name="motor" joint="hinge" ctrllimited="true" ctrlrange="-1 1"/>
+  </actuator>
+</mujoco>
+"""
+
 # Construction--------------------------------------------------------
 
 
@@ -162,6 +176,13 @@ def test_show_inertia_property(scene):
   assert bool(scene._mjv_option.flags[mujoco.mjtVisFlag.mjVIS_INERTIA])
 
 
+def test_show_actuators_property(scene):
+  assert scene.show_actuators is False
+  scene.show_actuators = True
+  assert scene.show_actuators is True
+  assert bool(scene._mjv_option.flags[mujoco.mjtVisFlag.mjVIS_ACTUATOR])
+
+
 def test_frame_mode_property(scene):
   assert scene.frame_mode == "None"
   scene.frame_mode = "Body"
@@ -258,3 +279,46 @@ def test_convex_hull_dynamic_handle_updates_with_mjdata():
     server.stop()
   except RuntimeError:
     pass
+
+
+def test_decor_handles_reused_when_joint_and_actuator_counts_change():
+  server = viser.ViserServer(port=0)
+  model = mujoco.MjModel.from_xml_string(_ACTUATED_HINGE_XML)
+  data = mujoco.MjData(model)
+  mujoco.mj_forward(model, data)
+  scene = ViserMujocoScene(server, model, num_envs=1)
+
+  scene._mjv_option.flags[mujoco.mjtVisFlag.mjVIS_JOINT] = 1
+  scene.update_from_mjdata(data)
+
+  handles_before = scene._decor_handles.copy()
+  counts_before = {
+    key: len(handle.batched_positions) for key, handle in handles_before.items()
+  }
+  assert handles_before
+
+  scene._mjv_option.flags[mujoco.mjtVisFlag.mjVIS_ACTUATOR] = 1
+  scene.update_from_mjdata(data)
+
+  shared_keys = handles_before.keys() & scene._decor_handles.keys()
+  assert shared_keys
+  assert any(
+    len(scene._decor_handles[key].batched_positions) != counts_before[key]
+    for key in shared_keys
+  )
+  for key in shared_keys:
+    assert scene._decor_handles[key] is handles_before[key]
+
+  try:
+    server.stop()
+  except RuntimeError:
+    pass
+
+
+def test_request_update_uses_refresh_handler(scene):
+  calls: list[str] = []
+  scene.set_refresh_handler(lambda: calls.append("refresh"))
+
+  scene.request_update()
+
+  assert calls == ["refresh"]

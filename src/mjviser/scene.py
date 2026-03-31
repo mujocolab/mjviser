@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 from collections import defaultdict
+from collections.abc import Callable
+from threading import RLock
 
 import mujoco
 import numpy as np
@@ -134,6 +136,8 @@ class ViserMujocoScene:
     self._decor_handles: dict[tuple[int, bool], viser.BatchedMeshHandle] = {}
     self._fixed_geom_handles: dict[tuple[int, int, int], viser.GlbHandle] = {}
     self._fixed_site_handles: dict[tuple[int, int], viser.GlbHandle] = {}
+    self._update_lock = RLock()
+    self._refresh_handler: Callable[[], None] | None = None
     self._hull_body_meshes: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     self._hull_fixed_handles: dict[int, viser.BatchedMeshHandle] = {}
     self._hull_dynamic_handles: list[tuple[viser.BatchedMeshHandle, int]] = []
@@ -229,17 +233,43 @@ class ViserMujocoScene:
     self._mjv_option.flags[mujoco.mjtVisFlag.mjVIS_INERTIA] = int(value)
 
   @property
+  def show_actuators(self) -> bool:
+    return bool(self._mjv_option.flags[mujoco.mjtVisFlag.mjVIS_ACTUATOR])
+
+  @show_actuators.setter
+  def show_actuators(self, value: bool) -> None:
+    self._mjv_option.flags[mujoco.mjtVisFlag.mjVIS_ACTUATOR] = int(value)
+
+  @property
   def show_convex_hull(self) -> bool:
     return self._show_convex_hull
 
   @show_convex_hull.setter
   def show_convex_hull(self, value: bool) -> None:
-    self._show_convex_hull = value
-    for handle in self._hull_fixed_handles.values():
-      handle.visible = value
-    for handle, _ in self._hull_dynamic_handles:
-      handle.visible = value
-    self._sync_visibilities()
+    with self._update_lock:
+      self._show_convex_hull = value
+      for handle in self._hull_fixed_handles.values():
+        handle.visible = value
+      for handle, _ in self._hull_dynamic_handles:
+        handle.visible = value
+      self._sync_visibilities()
+
+  def set_refresh_handler(self, handler: Callable[[], None] | None) -> None:
+    """Install a callback used to refresh cached visualization state."""
+    with self._update_lock:
+      self._refresh_handler = handler
+
+  def _apply_visualization_change(self, mutator: Callable[[], None]) -> None:
+    """Apply a GUI-side visualization change and refresh from cached state."""
+    refresh_handler: Callable[[], None] | None = None
+    with self._update_lock:
+      mutator()
+      self.needs_update = True
+      refresh_handler = self._refresh_handler
+      if refresh_handler is None:
+        self._refresh_visualization_locked()
+        return
+    refresh_handler()
 
   @property
   def frame_mode(self) -> str:
@@ -314,8 +344,9 @@ class ViserMujocoScene:
 
         @env_slider.on_update
         def _(_) -> None:
-          self.env_idx = int(env_slider.value)
-          self.request_update()
+          self._apply_visualization_change(
+            lambda: setattr(self, "env_idx", int(env_slider.value))
+          )
 
         show_only_cb = self.server.gui.add_checkbox(
           "Hide others",
@@ -325,8 +356,9 @@ class ViserMujocoScene:
 
         @show_only_cb.on_update
         def _(_) -> None:
-          self.show_only_selected = show_only_cb.value
-          self.request_update()
+          self._apply_visualization_change(
+            lambda: setattr(self, "show_only_selected", show_only_cb.value)
+          )
 
     _center = self.mj_model.stat.center.copy()
     _extent = self.mj_model.stat.extent
@@ -354,12 +386,14 @@ class ViserMujocoScene:
 
       @cb_camera_tracking.on_update
       def _(_) -> None:
-        self.camera_tracking_enabled = cb_camera_tracking.value
-        if self.camera_tracking_enabled:
-          for client in self.server.get_clients().values():
-            client.camera.position = _camera_offset
-            client.camera.look_at = np.zeros(3)
-        self.request_update()
+        def _mutate() -> None:
+          self.camera_tracking_enabled = cb_camera_tracking.value
+          if self.camera_tracking_enabled:
+            for client in self.server.get_clients().values():
+              client.camera.position = _camera_offset
+              client.camera.look_at = np.zeros(3)
+
+        self._apply_visualization_change(_mutate)
 
       slider_fov = self.server.gui.add_slider(
         "FOV (\u00b0)",
@@ -400,9 +434,9 @@ class ViserMujocoScene:
 
       @cb.on_update
       def _(event, _idx=flag_idx) -> None:
-        _opt.flags[_idx] = int(event.target.value)
-        self._clear_decor_handles()
-        self.request_update()
+        self._apply_visualization_change(
+          lambda: _opt.flags.__setitem__(_idx, int(event.target.value))
+        )
 
     def _color_controls(rgba_attr: str) -> None:
       """Add color picker + opacity slider for a model.vis.rgba field."""
@@ -422,11 +456,12 @@ class ViserMujocoScene:
       )
 
       def _on_update(_, _a=rgba_attr, _cp=cp, _op=op) -> None:
-        arr = getattr(_rgba, _a)
-        r, g, b = _cp.value
-        arr[:] = [r / 255, g / 255, b / 255, _op.value]
-        self._clear_decor_handles()
-        self.request_update()
+        def _mutate() -> None:
+          arr = getattr(_rgba, _a)
+          r, g, b = _cp.value
+          arr[:] = [r / 255, g / 255, b / 255, _op.value]
+
+        self._apply_visualization_change(_mutate)
 
       cp.on_update(_on_update)
       op.on_update(_on_update)
@@ -453,9 +488,7 @@ class ViserMujocoScene:
 
       @sl.on_update
       def _(_, _obj=obj, _attr=attr, _sl=sl) -> None:
-        setattr(_obj, _attr, _sl.value)
-        self._clear_decor_handles()
-        self.request_update()
+        self._apply_visualization_change(lambda: setattr(_obj, _attr, _sl.value))
 
     # -- Frames -----------------------------------------------------------
 
@@ -465,8 +498,9 @@ class ViserMujocoScene:
 
     @frame_dropdown.on_update
     def _(_) -> None:
-      self.frame_mode = frame_dropdown.value
-      self.request_update()
+      self._apply_visualization_change(
+        lambda: setattr(self, "frame_mode", frame_dropdown.value)
+      )
 
     _scale_slider("Frame length", _vis, "framelength", 0.1, 5.0, 0.05)
     _scale_slider("Frame width", _vis, "framewidth", 0.01, 1.0, 0.01)
@@ -493,9 +527,11 @@ class ViserMujocoScene:
 
       @cb_split.on_update
       def _(event) -> None:
-        _opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTSPLIT] = int(event.target.value)
-        self._clear_decor_handles()
-        self.request_update()
+        self._apply_visualization_change(
+          lambda: _opt.flags.__setitem__(
+            mujoco.mjtVisFlag.mjVIS_CONTACTSPLIT, int(event.target.value)
+          )
+        )
 
     # -- Inertia ----------------------------------------------------------
 
@@ -512,11 +548,13 @@ class ViserMujocoScene:
 
       @inertia_shape.on_update
       def _(_) -> None:
-        self.mj_model.vis.global_.ellipsoidinertia = int(
-          inertia_shape.value == "Ellipsoid"
+        self._apply_visualization_change(
+          lambda: setattr(
+            self.mj_model.vis.global_,
+            "ellipsoidinertia",
+            int(inertia_shape.value == "Ellipsoid"),
+          )
         )
-        self._clear_decor_handles()
-        self.request_update()
 
       _color_controls("inertia")
 
@@ -527,6 +565,14 @@ class ViserMujocoScene:
       _color_controls("joint")
       _scale_slider("Length", _vis, "jointlength", 0.1, 5.0, 0.05)
       _scale_slider("Width", _vis, "jointwidth", 0.01, 1.0, 0.01)
+
+    # -- Actuators -------------------------------------------------------
+
+    with self.server.gui.add_folder("Actuators"):
+      _vis_flag_cb(int(mujoco.mjtVisFlag.mjVIS_ACTUATOR))
+      _color_controls("actuator")
+      _scale_slider("Length", _vis, "actuatorlength", 0.1, 5.0, 0.05)
+      _scale_slider("Width", _vis, "actuatorwidth", 0.01, 1.0, 0.01)
 
     # -- Convex hull ------------------------------------------------------
 
@@ -546,22 +592,27 @@ class ViserMujocoScene:
 
       @hull_enabled.on_update
       def _(_) -> None:
-        self.show_convex_hull = hull_enabled.value
-        self.request_update()
+        self._apply_visualization_change(
+          lambda: setattr(self, "show_convex_hull", hull_enabled.value)
+        )
 
       @hull_hide_meshes.on_update
       def _(_) -> None:
-        self._hull_hide_meshes = hull_hide_meshes.value
-        self._sync_visibilities()
-        self.request_update()
+        def _mutate() -> None:
+          self._hull_hide_meshes = hull_hide_meshes.value
+          self._sync_visibilities()
+
+        self._apply_visualization_change(_mutate)
 
       def _rebuild_hulls(_=None) -> None:
-        self._hull_color = hull_color.value
-        self._hull_opacity = hull_opacity.value
-        self._clear_hull_handles()
-        self._build_hull_handles()
-        self.show_convex_hull = hull_enabled.value
-        self.request_update()
+        def _mutate() -> None:
+          self._hull_color = hull_color.value
+          self._hull_opacity = hull_opacity.value
+          self._clear_hull_handles()
+          self._build_hull_handles()
+          self.show_convex_hull = hull_enabled.value
+
+        self._apply_visualization_change(_mutate)
 
       hull_color.on_update(_rebuild_hulls)
       hull_opacity.on_update(_rebuild_hulls)
@@ -572,7 +623,6 @@ class ViserMujocoScene:
     _opt.flags[_tendon_flag] = int(self.mj_model.ntendon > 0)
     _simple_flags: list[tuple[str, int, bool]] = [
       ("Tendons", _tendon_flag, self.mj_model.ntendon > 0),
-      ("Actuators", int(mujoco.mjtVisFlag.mjVIS_ACTUATOR), False),
       ("COM", int(mujoco.mjtVisFlag.mjVIS_COM), False),
       ("Constraints", int(mujoco.mjtVisFlag.mjVIS_CONSTRAINT), False),
       ("Auto-connect", int(mujoco.mjtVisFlag.mjVIS_AUTOCONNECT), False),
@@ -583,9 +633,9 @@ class ViserMujocoScene:
 
       @cb.on_update
       def _(event, _idx=flag_idx) -> None:
-        _opt.flags[_idx] = int(event.target.value)
-        self._clear_decor_handles()
-        self.request_update()
+        self._apply_visualization_change(
+          lambda: _opt.flags.__setitem__(_idx, int(event.target.value))
+        )
 
     # -- Global scale -----------------------------------------------------
 
@@ -611,9 +661,11 @@ class ViserMujocoScene:
 
         @cb.on_update
         def _(event, group_idx=i) -> None:
-          self.geom_groups_visible[group_idx] = event.target.value
-          self._sync_visibilities()
-          self.request_update()
+          def _mutate() -> None:
+            self.geom_groups_visible[group_idx] = event.target.value
+            self._sync_visibilities()
+
+          self._apply_visualization_change(_mutate)
 
     with self.server.gui.add_folder("Sites"):
       for i in range(6):
@@ -625,9 +677,11 @@ class ViserMujocoScene:
 
         @cb.on_update
         def _(event, group_idx=i) -> None:
-          self.site_groups_visible[group_idx] = event.target.value
-          self._sync_visibilities()
-          self.request_update()
+          def _mutate() -> None:
+            self.site_groups_visible[group_idx] = event.target.value
+            self._sync_visibilities()
+
+          self._apply_visualization_change(_mutate)
 
     # mjvOption group arrays for decor elements.
     _opt_groups: list[tuple[str, str]] = [
@@ -646,9 +700,9 @@ class ViserMujocoScene:
 
           @cb.on_update
           def _(event, _arr=group_arr, _idx=i) -> None:
-            _arr[_idx] = int(event.target.value)
-            self._clear_decor_handles()
-            self.request_update()
+            self._apply_visualization_change(
+              lambda: _arr.__setitem__(_idx, int(event.target.value))
+            )
 
   def create_visualization_gui(
     self,
@@ -786,6 +840,31 @@ class ViserMujocoScene:
     mj_data: mujoco.MjData | None = None,
   ) -> None:
     """Shared visualization update logic."""
+    with self._update_lock:
+      self._update_visualization_locked(
+        body_xpos,
+        body_xmat,
+        mocap_pos,
+        mocap_quat,
+        env_idx,
+        scene_offset,
+        mj_data,
+      )
+
+  def _update_visualization_locked(
+    self,
+    body_xpos: np.ndarray,
+    body_xmat: np.ndarray,
+    mocap_pos: np.ndarray,
+    mocap_quat: np.ndarray,
+    env_idx: int,
+    scene_offset: np.ndarray,
+    mj_data: mujoco.MjData | None = None,
+  ) -> None:
+    """Shared visualization update logic.
+
+    The caller must hold ``self._update_lock``.
+    """
     self._last_body_xpos = body_xpos
     self._last_body_xmat = body_xmat
     self._last_mocap_pos = mocap_pos
@@ -884,11 +963,18 @@ class ViserMujocoScene:
   def request_update(self) -> None:
     """Request a visualization update and trigger immediate re-render
     from cache."""
-    self.needs_update = True
-    self.refresh_visualization()
+    self._apply_visualization_change(lambda: None)
 
   def refresh_visualization(self) -> None:
     """Re-render the scene using cached visualization data."""
+    with self._update_lock:
+      self._refresh_visualization_locked()
+
+  def _refresh_visualization_locked(self) -> None:
+    """Re-render the scene using cached visualization data.
+
+    The caller must hold ``self._update_lock``.
+    """
     if (
       self._last_body_xpos is None
       or self._last_body_xmat is None
@@ -904,7 +990,7 @@ class ViserMujocoScene:
       ].copy()
       scene_offset = -tracked_pos
 
-    self._update_visualization(
+    self._update_visualization_locked(
       self._last_body_xpos,
       self._last_body_xmat,
       self._last_mocap_pos,
@@ -1168,13 +1254,6 @@ class ViserMujocoScene:
       handle.remove()
     self._hull_dynamic_handles.clear()
 
-  def _clear_decor_handles(self) -> None:
-    """Remove all decor handles and clear the cache."""
-    handles = list(self._decor_handles.values())
-    self._decor_handles.clear()
-    for handle in handles:
-      handle.remove()
-
   def _hide_all_decor(self) -> None:
     """Hide all decor handles without removing them."""
     for handle in self._decor_handles.values():
@@ -1270,13 +1349,15 @@ class ViserMujocoScene:
       # Tendons use cylinders; other capsules use real capsule meshes.
       mesh_type = _CYLINDER if is_tendon else geom_type
       key = (geom_type, is_tendon)
+      batched_opacities = None if np.all(opacities == 1.0) else opacities
 
       handle = self._decor_handles.get(key)
-      if handle is not None and n == len(handle.batched_positions):
-        # Reuse existing handle, just update transforms.
+      if handle is not None:
         handle.batched_positions = positions
         handle.batched_wxyzs = orientations
         handle.batched_scales = scales
+        handle.batched_colors = colors
+        handle.batched_opacities = batched_opacities
         handle.visible = True
       else:
         unit = _get_unit_mesh(mesh_type)
@@ -1288,7 +1369,7 @@ class ViserMujocoScene:
           batched_positions=positions,
           batched_scales=scales,
           batched_colors=colors,
-          batched_opacities=opacities,
+          batched_opacities=batched_opacities,
           lod="off",
           cast_shadow=False,
           receive_shadow=False,
@@ -1304,13 +1385,15 @@ class ViserMujocoScene:
       h_scl = np.array(all_head_scales)
       h_col = np.array(all_head_colors)
       h_opa = np.array(all_head_opacities, dtype=np.float32)
-      nh = len(all_head_positions)
+      h_batched_opacities = None if np.all(h_opa == 1.0) else h_opa
 
       h_handle = self._decor_handles.get(head_key)
-      if h_handle is not None and nh == len(h_handle.batched_positions):
+      if h_handle is not None:
         h_handle.batched_positions = h_pos
         h_handle.batched_wxyzs = h_ori
         h_handle.batched_scales = h_scl
+        h_handle.batched_colors = h_col
+        h_handle.batched_opacities = h_batched_opacities
         h_handle.visible = True
       else:
         unit = _get_unit_mesh(_ARROW_HEAD)
@@ -1322,7 +1405,7 @@ class ViserMujocoScene:
           batched_positions=h_pos,
           batched_scales=h_scl,
           batched_colors=h_col,
-          batched_opacities=h_opa,
+          batched_opacities=h_batched_opacities,
           lod="off",
           cast_shadow=False,
           receive_shadow=False,
