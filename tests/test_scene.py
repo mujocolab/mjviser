@@ -56,6 +56,19 @@ _ACTUATED_HINGE_XML = """
 </mujoco>
 """
 
+_AUTO_CONNECT_XML = """
+<mujoco>
+  <worldbody>
+    <body name="parent" pos="0 0 1.0">
+      <geom type="sphere" size="0.1"/>
+      <body name="child" pos="0 0 2.0">
+        <geom type="sphere" size="0.08"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
 # Construction--------------------------------------------------------
 
 
@@ -322,3 +335,45 @@ def test_request_update_uses_refresh_handler(scene):
   scene.request_update()
 
   assert calls == ["refresh"]
+
+
+def test_autoconnect_capsules_match_mujoco_connector_sizes():
+  server = viser.ViserServer(port=0)
+  model = mujoco.MjModel.from_xml_string(_AUTO_CONNECT_XML)
+  data = mujoco.MjData(model)
+  mujoco.mj_forward(model, data)
+  scene = ViserMujocoScene(server, model, num_envs=1)
+
+  scene._mjv_option.flags[mujoco.mjtVisFlag.mjVIS_AUTOCONNECT] = 1
+  scene.update_from_mjdata(data)
+
+  capsule_key = (int(mujoco.mjtGeom.mjGEOM_CAPSULE), False)
+  assert capsule_key in scene._decor_handles
+  assert all(handle.visible for handle in scene._fixed_geom_handles.values())
+
+  capsule_handle = scene._decor_handles[capsule_key]
+  assert len(capsule_handle.batched_positions) == 1
+  assert capsule_handle.batched_scales is not None
+
+  connector_geom = None
+  for geom_idx in range(scene._mjv_scene.ngeom):
+    geom = scene._mjv_scene.geoms[geom_idx]
+    if int(geom.type) == int(mujoco.mjtGeom.mjGEOM_CAPSULE):
+      connector_geom = geom
+      break
+
+  if connector_geom is None:
+    raise AssertionError("Expected an auto-connect capsule geom in mjvScene")
+  half_total = float(connector_geom.size[2])
+  rendered_length = float(capsule_handle.batched_scales[0, 2])
+
+  np.testing.assert_allclose(rendered_length, 2.0 * half_total)
+
+  scene._autoconnect_hide_meshes = True
+  scene._sync_visibilities()
+  assert not any(handle.visible for handle in scene._fixed_geom_handles.values())
+
+  try:
+    server.stop()
+  except RuntimeError:
+    pass
