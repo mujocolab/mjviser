@@ -17,6 +17,7 @@ from .conversions import (
   group_geoms_by_visual_compat,
   is_fixed_body,
   merge_geoms,
+  merge_geoms_hull,
   merge_sites,
 )
 
@@ -133,6 +134,13 @@ class ViserMujocoScene:
     self._decor_handles: dict[tuple[int, bool], viser.BatchedMeshHandle] = {}
     self._fixed_geom_handles: dict[tuple[int, int, int], viser.GlbHandle] = {}
     self._fixed_site_handles: dict[tuple[int, int], viser.GlbHandle] = {}
+    self._hull_body_meshes: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    self._hull_fixed_handles: dict[int, viser.BatchedMeshHandle] = {}
+    self._hull_dynamic_handles: list[tuple[viser.BatchedMeshHandle, int]] = []
+    self._hull_color: tuple[int, int, int] = (230, 230, 255)
+    self._hull_opacity = 0.5
+    self._show_convex_hull = False
+    self._hull_hide_meshes = False
 
     # Visualization settings.
     self.env_idx = 0
@@ -178,6 +186,8 @@ class ViserMujocoScene:
     self._create_mesh_handles_by_group()
     self._add_fixed_sites()
     self._create_site_handles_by_group()
+    self._compute_hull_body_meshes()
+    self._build_hull_handles()
 
     for body_id in range(mj_model.nbody):
       if not is_fixed_body(mj_model, body_id):
@@ -219,6 +229,19 @@ class ViserMujocoScene:
     self._mjv_option.flags[mujoco.mjtVisFlag.mjVIS_INERTIA] = int(value)
 
   @property
+  def show_convex_hull(self) -> bool:
+    return self._show_convex_hull
+
+  @show_convex_hull.setter
+  def show_convex_hull(self, value: bool) -> None:
+    self._show_convex_hull = value
+    for handle in self._hull_fixed_handles.values():
+      handle.visible = value
+    for handle, _ in self._hull_dynamic_handles:
+      handle.visible = value
+    self._sync_visibilities()
+
+  @property
   def frame_mode(self) -> str:
     current = int(self._mjv_option.frame)
     for name, val in _FRAME_MODES.items():
@@ -238,11 +261,21 @@ class ViserMujocoScene:
 
   def _sync_visibilities(self) -> None:
     """Synchronize all handle visibilities based on current flags."""
-    for mg in self._mesh_groups:
-      mg.handle.visible = mg.group_id < 6 and self.geom_groups_visible[mg.group_id]
+    hidden_bodies: set[int] = set()
+    if self._show_convex_hull and self._hull_hide_meshes:
+      hidden_bodies = set(self._hull_body_meshes.keys())
 
-    for (_, group_id, _), handle in self._fixed_geom_handles.items():
-      handle.visible = group_id < 6 and self.geom_groups_visible[group_id]
+    for mg in self._mesh_groups:
+      visible = mg.group_id < 6 and self.geom_groups_visible[mg.group_id]
+      if visible and any(body_id in hidden_bodies for body_id in mg.body_ids):
+        visible = False
+      mg.handle.visible = visible
+
+    for (body_id, group_id, _), handle in self._fixed_geom_handles.items():
+      visible = group_id < 6 and self.geom_groups_visible[group_id]
+      if visible and body_id in hidden_bodies:
+        visible = False
+      handle.visible = visible
 
     for (_, group_id), handle in self.site_handles_by_group.items():
       handle.visible = group_id < 6 and self.site_groups_visible[group_id]
@@ -494,6 +527,44 @@ class ViserMujocoScene:
       _color_controls("joint")
       _scale_slider("Length", _vis, "jointlength", 0.1, 5.0, 0.05)
       _scale_slider("Width", _vis, "jointwidth", 0.01, 1.0, 0.01)
+
+    # -- Convex hull ------------------------------------------------------
+
+    with self.server.gui.add_folder("Convex hull"):
+      hull_enabled = self.server.gui.add_checkbox("Enabled", initial_value=False)
+      hull_hide_meshes = self.server.gui.add_checkbox(
+        "Hide meshes", initial_value=False
+      )
+      hull_color = self.server.gui.add_rgb("Color", initial_value=self._hull_color)
+      hull_opacity = self.server.gui.add_slider(
+        "Opacity",
+        min=0.0,
+        max=1.0,
+        step=0.05,
+        initial_value=self._hull_opacity,
+      )
+
+      @hull_enabled.on_update
+      def _(_) -> None:
+        self.show_convex_hull = hull_enabled.value
+        self.request_update()
+
+      @hull_hide_meshes.on_update
+      def _(_) -> None:
+        self._hull_hide_meshes = hull_hide_meshes.value
+        self._sync_visibilities()
+        self.request_update()
+
+      def _rebuild_hulls(_=None) -> None:
+        self._hull_color = hull_color.value
+        self._hull_opacity = hull_opacity.value
+        self._clear_hull_handles()
+        self._build_hull_handles()
+        self.show_convex_hull = hull_enabled.value
+        self.request_update()
+
+      hull_color.on_update(_rebuild_hulls)
+      hull_opacity.on_update(_rebuild_hulls)
 
     # -- Simple toggles ---------------------------------------------------
 
@@ -750,6 +821,16 @@ class ViserMujocoScene:
         )
         handle.batched_positions = pos
         handle.batched_wxyzs = quat
+
+      if self._show_convex_hull:
+        for handle, body_id in self._hull_dynamic_handles:
+          if not handle.visible:
+            continue
+          pos, quat = self._batched_transform(
+            body_xpos, body_xquat, body_id, env_idx, scene_offset, slice_single
+          )
+          handle.batched_positions = pos
+          handle.batched_wxyzs = quat
 
       if self._any_decor_visible() and mj_data is not None:
         self._update_decor_from_mjvscene(mj_data, scene_offset)
@@ -1009,6 +1090,82 @@ class ViserMujocoScene:
           visible=visible,
         )
         self.site_handles_by_group[(body_id, group_id)] = handle
+
+  def _compute_hull_body_meshes(self) -> None:
+    """Precompute one merged convex hull mesh per body that has mesh geoms."""
+    body_geoms: dict[int, list[int]] = {}
+    for geom_id in range(self.mj_model.ngeom):
+      if int(self.mj_model.geom_type[geom_id]) != int(mjtGeom.mjGEOM_MESH):
+        continue
+      if int(self.mj_model.geom_dataid[geom_id]) < 0:
+        continue
+      body_id = int(self.mj_model.geom_bodyid[geom_id])
+      body_geoms.setdefault(body_id, []).append(geom_id)
+
+    for body_id, geom_ids in body_geoms.items():
+      hull_mesh = merge_geoms_hull(self.mj_model, geom_ids)
+      if hull_mesh is None:
+        continue
+      self._hull_body_meshes[body_id] = (
+        hull_mesh.vertices.astype(np.float32),
+        hull_mesh.faces.astype(np.int32),
+      )
+
+  def _build_hull_handles(self) -> None:
+    """Build fixed and dynamic handles for precomputed body hulls."""
+    color = np.array(self._hull_color, dtype=np.uint8)
+    opacity = np.float32(self._hull_opacity)
+    batched_opacities = None if opacity >= 1.0 else np.array([opacity])
+
+    for body_id, (vertices, faces) in self._hull_body_meshes.items():
+      if is_fixed_body(self.mj_model, body_id):
+        body = self.mj_model.body(body_id)
+        handle = self.server.scene.add_batched_meshes_simple(
+          f"/fixed_bodies/hull/{body_id}",
+          vertices,
+          faces,
+          batched_wxyzs=np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+          batched_positions=np.zeros((1, 3), dtype=np.float32),
+          batched_colors=color[None],
+          batched_opacities=batched_opacities,
+          position=body.pos,
+          wxyz=body.quat,
+          visible=self._show_convex_hull,
+          cast_shadow=False,
+          receive_shadow=False,
+          lod="off",
+        )
+        self._hull_fixed_handles[body_id] = handle
+        continue
+
+      handle = self.server.scene.add_batched_meshes_simple(
+        f"/hull/{body_id}",
+        vertices,
+        faces,
+        batched_wxyzs=np.tile([1.0, 0.0, 0.0, 0.0], (self.num_envs, 1)).astype(
+          np.float32
+        ),
+        batched_positions=np.zeros((self.num_envs, 3), dtype=np.float32),
+        batched_colors=np.tile(color, (self.num_envs, 1)),
+        batched_opacities=(
+          None if opacity >= 1.0 else np.full(self.num_envs, opacity, dtype=np.float32)
+        ),
+        visible=self._show_convex_hull,
+        cast_shadow=False,
+        receive_shadow=False,
+        lod="off",
+      )
+      self._hull_dynamic_handles.append((handle, body_id))
+
+  def _clear_hull_handles(self) -> None:
+    """Remove convex hull handles and clear their caches."""
+    for handle in self._hull_fixed_handles.values():
+      handle.remove()
+    self._hull_fixed_handles.clear()
+
+    for handle, _ in self._hull_dynamic_handles:
+      handle.remove()
+    self._hull_dynamic_handles.clear()
 
   def _clear_decor_handles(self) -> None:
     """Remove all decor handles and clear the cache."""

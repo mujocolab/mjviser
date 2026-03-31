@@ -419,6 +419,74 @@ def merge_geoms(mj_model: mujoco.MjModel, geom_ids: list[int]) -> trimesh.Trimes
   )
 
 
+def _hull_trimesh_for_mesh_id(
+  mj_model: mujoco.MjModel, mesh_id: int
+) -> trimesh.Trimesh | None:
+  """Return convex-hull polygon faces for a mesh asset as a trimesh.
+
+  MuJoCo stores mesh hulls as polygon loops. This helper triangulates each
+  polygon fan-style in the asset's local vertex index space.
+  """
+  if mj_model.nmeshpoly == 0 or int(mj_model.mesh_polynum[mesh_id]) == 0:
+    return None
+
+  vert_start = int(mj_model.mesh_vertadr[mesh_id])
+  vert_count = int(mj_model.mesh_vertnum[mesh_id])
+  vertices = mj_model.mesh_vert[vert_start : vert_start + vert_count].copy()
+
+  poly_start = int(mj_model.mesh_polyadr[mesh_id])
+  poly_count = int(mj_model.mesh_polynum[mesh_id])
+  tri_faces: list[list[int]] = []
+
+  for poly_id in range(poly_start, poly_start + poly_count):
+    vert_adr = int(mj_model.mesh_polyvertadr[poly_id])
+    vert_num = int(mj_model.mesh_polyvertnum[poly_id])
+    poly_vertices = mj_model.mesh_polyvert[vert_adr : vert_adr + vert_num]
+    for i in range(1, vert_num - 1):
+      tri_faces.append(
+        [int(poly_vertices[0]), int(poly_vertices[i]), int(poly_vertices[i + 1])]
+      )
+
+  if not tri_faces:
+    return None
+
+  return trimesh.Trimesh(
+    vertices=vertices,
+    faces=np.array(tri_faces, dtype=np.int32),
+    process=False,
+  )
+
+
+def merge_geoms_hull(
+  mj_model: mujoco.MjModel, geom_ids: list[int]
+) -> trimesh.Trimesh | None:
+  """Merge mesh-geom convex hulls into one trimesh in local body space."""
+  meshes: list[trimesh.Trimesh] = []
+  positions: list[np.ndarray] = []
+  quats: list[np.ndarray] = []
+
+  for geom_id in geom_ids:
+    if int(mj_model.geom_type[geom_id]) != int(mjtGeom.mjGEOM_MESH):
+      continue
+
+    mesh_id = int(mj_model.geom_dataid[geom_id])
+    if mesh_id < 0:
+      continue
+
+    hull = _hull_trimesh_for_mesh_id(mj_model, mesh_id)
+    if hull is None:
+      continue
+
+    meshes.append(hull)
+    positions.append(mj_model.geom_pos[geom_id])
+    quats.append(mj_model.geom_quat[geom_id])
+
+  if not meshes:
+    return None
+
+  return _merge_meshes(meshes, positions, quats)
+
+
 def rotation_matrix_from_vectors(
   from_vec: np.ndarray, to_vec: np.ndarray
 ) -> np.ndarray:
