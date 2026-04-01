@@ -90,6 +90,31 @@ def test_scene_fixed_bodies_frame_exists(scene):
   assert scene.fixed_bodies_frame is not None
 
 
+def test_nested_fixed_body_world_position():
+  # A nested fixed body whose parent has a non-zero position: the mesh handle
+  # must be placed at the world position (1.5, 0, 0), not the local offset (0.5, 0, 0).
+  xml = """
+  <mujoco>
+    <worldbody>
+      <body name="parent" pos="1 0 0">
+        <body name="child" pos="0.5 0 0">
+          <geom type="box" size=".1 .1 .1"/>
+        </body>
+      </body>
+    </worldbody>
+  </mujoco>
+  """
+  model = mujoco.MjModel.from_xml_string(xml)
+  server = viser.ViserServer(port=0)
+  try:
+    scene = ViserMujocoScene(server, model, num_envs=1)
+    child_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "child")
+    handle = scene._fixed_geom_handles[(child_id, 0, 0)]
+    np.testing.assert_allclose(handle.position, [1.5, 0.0, 0.0], atol=1e-6)
+  finally:
+    server.stop()
+
+
 def test_scene_tracked_body(scene, simple_model):
   assert scene._tracked_body_id is not None
   assert not is_fixed_body(simple_model, scene._tracked_body_id)

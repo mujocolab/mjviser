@@ -199,6 +199,8 @@ class ViserMujocoScene:
       environment_intensity=_DEFAULT_ENVIRONMENT_INTENSITY
     )
     self.fixed_bodies_frame = server.scene.add_frame("/fixed_bodies", show_axes=False)
+    # Populate xpos/xquat so fixed body geometry is placed in world space.
+    mujoco.mj_kinematics(mj_model, self.mj_data)
     self._add_fixed_geometry()
     self._create_mesh_handles_by_group()
     self._add_fixed_sites()
@@ -1074,8 +1076,8 @@ class ViserMujocoScene:
           merge_geoms(self.mj_model, sub_geom_ids),
           cast_shadow=False,
           receive_shadow=0.2,
-          position=self.mj_model.body(body_id).pos,
-          wxyz=self.mj_model.body(body_id).quat,
+          position=self.mj_data.xpos[body_id],
+          wxyz=self.mj_data.xquat[body_id],
           visible=visible,
         )
         self._fixed_geom_handles[(body_id, group_id, sub_idx)] = handle
