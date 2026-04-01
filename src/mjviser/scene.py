@@ -1066,6 +1066,14 @@ class ViserMujocoScene:
       body_name = get_body_name(self.mj_model, body_id)
       visible = group_id < 6 and self.geom_groups_visible[group_id]
       subgroups = group_geoms_by_visual_compat(self.mj_model, geom_ids)
+      # Compute world position of this body by traversing up the body tree.
+      body = self.mj_model.body(body_id)
+      world_pos = body.pos.copy()
+      parent_id = body.parentid[0]
+      while parent_id != 0:
+        parent_body = self.mj_model.body(parent_id)
+        world_pos = parent_body.pos + world_pos
+        parent_id = parent_body.parentid[0]
       for sub_idx, sub_geom_ids in enumerate(subgroups):
         suffix = f"/sub{sub_idx}" if len(subgroups) > 1 else ""
         handle = self.server.scene.add_mesh_trimesh(
@@ -1073,7 +1081,7 @@ class ViserMujocoScene:
           merge_geoms(self.mj_model, sub_geom_ids),
           cast_shadow=False,
           receive_shadow=0.2,
-          position=self.mj_model.body(body_id).pos,
+          position=world_pos,
           wxyz=self.mj_model.body(body_id).quat,
           visible=visible,
         )
