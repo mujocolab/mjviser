@@ -951,7 +951,7 @@ class ViserMujocoScene:
       if self._any_decor_visible() and mj_data is not None:
         self._update_decor_from_mjvscene(mj_data, scene_offset)
       elif not self._any_decor_visible():
-        self._hide_all_decor()
+        self._clear_decor_handles()
 
       self.server.flush()
 
@@ -1292,6 +1292,12 @@ class ViserMujocoScene:
     for handle, _ in self._hull_dynamic_handles:
       handle.remove()
     self._hull_dynamic_handles.clear()
+
+  def _clear_decor_handles(self) -> None:
+    """Remove decor handles and clear their cache."""
+    for handle in self._decor_handles.values():
+      handle.remove()
+    self._decor_handles.clear()
 
   def _hide_all_decor(self) -> None:
     """Hide all decor handles without removing them."""
