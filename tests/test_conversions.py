@@ -1,3 +1,4 @@
+import mujoco
 import numpy as np
 import pytest
 import trimesh
@@ -13,6 +14,7 @@ from mjviser.conversions import (
   create_primitive_mesh,
   create_site_mesh,
   get_body_name,
+  group_geoms_by_visual_compat,
   is_fixed_body,
   merge_geoms,
   merge_geoms_hull,
@@ -145,6 +147,29 @@ def test_merge_geoms(simple_model):
   mesh = merge_geoms(simple_model, [1, 2])
   assert isinstance(mesh, trimesh.Trimesh)
   assert len(mesh.vertices) > 0
+
+
+def test_group_geoms_by_visual_compat_splits_textured_hfield():
+  xml = """
+<mujoco>
+  <asset>
+    <hfield name="terrain" nrow="4" ncol="4" size="1 1 0.2 0.1"/>
+    <texture name="tex" type="2d" builtin="checker"
+             width="16" height="16" rgb1="0.1 0.8 0.2" rgb2="0.8 0.2 0.1"/>
+    <material name="mat" texture="tex"/>
+  </asset>
+  <worldbody>
+    <body name="terrain">
+      <geom name="hf" type="hfield" hfield="terrain" material="mat"/>
+      <geom name="wall" type="box" size="0.1 0.1 0.1" pos="1 0 0"
+            rgba="0.2 0.2 0.2 1"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+  model = mujoco.MjModel.from_xml_string(xml)
+  groups = group_geoms_by_visual_compat(model, [0, 1])
+  assert groups == [[0], [1]]
 
 
 def test_merge_geoms_hull(cubemap_model):

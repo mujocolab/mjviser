@@ -298,7 +298,13 @@ def _create_heightfield_mesh(mj_model: mujoco.MjModel, geom_id: int) -> trimesh.
     uu, vv = np.meshgrid(u, v)
     uv = np.column_stack((uu.ravel(), vv.ravel()))
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-    material = trimesh.visual.material.PBRMaterial(baseColorTexture=tex_image)
+    rgba = mj_model.mat_rgba[matid]
+    material = trimesh.visual.material.PBRMaterial(
+      baseColorFactor=rgba,
+      baseColorTexture=tex_image,
+      metallicFactor=0.0,
+      roughnessFactor=1.0,
+    )
     mesh.visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
     return mesh
 
@@ -318,18 +324,23 @@ def _create_heightfield_mesh(mj_model: mujoco.MjModel, geom_id: int) -> trimesh.
 def get_geom_texture_id(mj_model: mujoco.MjModel, geom_idx: int) -> int:
   """Return the texture ID the trimesh conversion will use, or -1.
 
-  Returns -1 when the geom is a primitive, the material has no
-  texture, or the mesh has no UV coordinates.
+  Returns -1 when the geom has no texture in the trimesh conversion
+  path. Mesh geoms require UVs; heightfields use their material texture
+  directly.
   """
-  if mj_model.geom_type[geom_idx] != mjtGeom.mjGEOM_MESH:
-    return -1
-
   matid = mj_model.geom_matid[geom_idx]
   if matid < 0 or matid >= mj_model.nmat:
     return -1
 
   texid = _get_texture_id(mj_model, matid)
   if texid < 0:
+    return -1
+
+  geom_type = mj_model.geom_type[geom_idx]
+  if geom_type == mjtGeom.mjGEOM_HFIELD:
+    return texid
+
+  if geom_type != mjtGeom.mjGEOM_MESH:
     return -1
 
   mesh_id = mj_model.geom_dataid[geom_idx]
