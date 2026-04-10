@@ -281,8 +281,6 @@ class Viewer:
         )
         for sl, _ in self._joint_sliders:
           sl.disabled = not self._paused
-        for sl, _ in self._actuator_sliders:
-          sl.disabled = not self._paused
         self._update_status_display()
 
       step_btn = self._server.gui.add_button("Step", icon=viser.Icon.PLAYER_TRACK_NEXT)
@@ -461,6 +459,7 @@ class Viewer:
           max=hi,
           step=round((hi - lo) / 200, 4),
           initial_value=round(val, 3),
+          disabled=False,
         )
 
         self._actuator_sliders.append((slider, act_id))
