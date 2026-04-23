@@ -33,7 +33,7 @@ dependencies = [
   "numpy",
   "trimesh>=4.8.3",
   "viser>=1.0.26",
-  "Pillow",
+  "Pillow>=12.2.0",
 ]
 
 [project.urls]
@@ -52,8 +52,13 @@ dev = [
 [dependency-groups]
 dev = [
   "pyright>=1.1.408",
-  "pytest>=9.0.2",
+  "pytest>=9.0.3",
   "ruff>=0.15.7",
+]
+
+[tool.uv]
+constraint-dependencies = [
+  "lxml>=6.1.0",
 ]
 
 [tool.ruff]
