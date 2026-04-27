@@ -489,13 +489,24 @@ class Viewer:
       ("Euler Damp", mujoco.mjtDisableBit.mjDSBL_EULERDAMP),
       ("Refsafe", mujoco.mjtDisableBit.mjDSBL_REFSAFE),
     ]
+    # multiccd moved from mjtEnableBit to mjtDisableBit in mujoco 3.8 (now
+    # default-on); native CCD was also added as a new disable bit in 3.8.
+    # Stubs are pinned to an older mujoco, so resolve via getattr.
+    for name, label in (
+      ("mjDSBL_MULTICCD", "Multi CCD"),
+      ("mjDSBL_NATIVECCD", "Native CCD"),
+    ):
+      bit = getattr(mujoco.mjtDisableBit, name, None)
+      if bit is not None:
+        disable_flags.append((label, bit))
 
     enable_flags = [
       ("Energy", mujoco.mjtEnableBit.mjENBL_ENERGY),
       ("Override", mujoco.mjtEnableBit.mjENBL_OVERRIDE),
       ("Fwd Inverse", mujoco.mjtEnableBit.mjENBL_FWDINV),
-      ("Multi CCD", mujoco.mjtEnableBit.mjENBL_MULTICCD),
     ]
+    if hasattr(mujoco.mjtEnableBit, "mjENBL_MULTICCD"):
+      enable_flags.append(("Multi CCD", mujoco.mjtEnableBit.mjENBL_MULTICCD))
 
     with self._server.gui.add_folder("Disable Flags"):
       for label, flag in disable_flags:
