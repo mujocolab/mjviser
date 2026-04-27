@@ -125,6 +125,21 @@ def test_scene_default_visibility(scene):
   assert scene.geom_groups_visible[3:] == [False, False, False]
 
 
+def test_rebuild_visual_handles_recreates_baked_mesh_handles(scene, simple_model):
+  old_handles = [group.handle for group in scene._mesh_groups]
+  assert old_handles
+
+  box_id = mujoco.mj_name2id(simple_model, mujoco.mjtObj.mjOBJ_GEOM, "box")
+  simple_model.geom_rgba[box_id] = [0.0, 0.0, 1.0, 1.0]
+
+  scene.rebuild_visual_handles()
+
+  new_handles = [group.handle for group in scene._mesh_groups]
+  assert new_handles
+  old_handle_ids = {id(handle) for handle in old_handles}
+  assert all(id(handle) not in old_handle_ids for handle in new_handles)
+
+
 # Batched transform---------------------------------------------------
 
 

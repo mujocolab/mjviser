@@ -274,6 +274,38 @@ class ViserMujocoScene:
     with self._update_lock:
       self._refresh_handler = handler
 
+  def rebuild_visual_handles(self) -> None:
+    """Rebuild handles whose geometry or appearance is baked at creation time."""
+    with self._update_lock:
+      for group in self._mesh_groups:
+        group.handle.remove()
+      self._mesh_groups.clear()
+
+      for handle in self._fixed_geom_handles.values():
+        handle.remove()
+      self._fixed_geom_handles.clear()
+
+      for handle in self._fixed_site_handles.values():
+        handle.remove()
+      self._fixed_site_handles.clear()
+
+      for handle in self.site_handles_by_group.values():
+        handle.remove()
+      self.site_handles_by_group.clear()
+
+      self._clear_hull_handles()
+      self._hull_body_meshes.clear()
+      self._hull_mesh_bodies.clear()
+
+      mujoco.mj_kinematics(self.mj_model, self.mj_data)
+      self._add_fixed_geometry()
+      self._create_mesh_handles_by_group()
+      self._add_fixed_sites()
+      self._create_site_handles_by_group()
+      self._compute_hull_body_meshes()
+      self._build_hull_handles()
+      self._sync_visibilities()
+
   def _apply_visualization_change(self, mutator: Callable[[], None]) -> None:
     """Apply a GUI-side visualization change and refresh from cached state."""
     refresh_handler: Callable[[], None] | None = None
