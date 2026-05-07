@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "mjviser"
-version = "0.0.13"
+version = "0.0.14"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 readme = "README.md"
@@ -33,7 +33,7 @@ dependencies = [
   "mujoco>=3.6.0",
   "numpy",
   "trimesh>=4.8.3",
-  "viser>=1.0.26",
+  "viser>=1.0.27",
   "Pillow>=12.2.0",
 ]
 
