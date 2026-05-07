@@ -200,6 +200,23 @@ class Viewer:
     self._stats_frames += 1
     self._update_stats()
 
+  def _apply_perturbation(self) -> None:
+    """Apply any pending interactive perturbation force."""
+    pert = self.scene.perturbation.get_perturbation()
+    if pert is not None:
+      self.data.qfrc_applied[:] = 0.0
+      mujoco.mj_applyFT(
+        self.model,
+        self.data,
+        pert.force,
+        pert.torque,
+        pert.point,
+        pert.body_id,
+        self.data.qfrc_applied,
+      )
+    else:
+      self.data.qfrc_applied[:] = 0.0
+
   def _step_physics(self, dt: float) -> bool:
     """Run physics steps for this frame's sim-time budget.
 
@@ -215,6 +232,7 @@ class Viewer:
     deadline = time.perf_counter() + _FRAME_TIME
     hit_deadline = False
     while self._budget >= step_dt:
+      self._apply_perturbation()
       self._step_fn(self.model, self.data)
       self._budget -= step_dt
       self._step_count += 1
@@ -258,53 +276,74 @@ class Viewer:
       </div>
       """
 
+  def _toggle_pause(self) -> None:
+    self._paused = not self._paused
+    if not self._paused:
+      self._budget = 0.0
+      self._last_tick = time.perf_counter()
+    self._pause_btn.label = "Pause" if not self._paused else "Play"
+    self._pause_btn.icon = (
+      viser.Icon.PLAYER_PAUSE if not self._paused else viser.Icon.PLAYER_PLAY
+    )
+    for sl, _ in self._joint_sliders:
+      sl.disabled = not self._paused
+    self._update_status_display()
+
+  def _single_step(self) -> None:
+    if self._paused:
+      with self._lock:
+        self._step_fn(self.model, self.data)
+        self._step_count += 1
+        self._render()
+        self._update_status_display()
+
+  def _do_reset(self) -> None:
+    with self._lock:
+      self._reset()
+      self._step_count = 0
+      self._budget = 0.0
+      self._render()
+      self._update_status_display()
+    self._sync_sliders()
+
+  def _speed_up(self) -> None:
+    self._speed_idx = min(len(_SPEEDS) - 1, self._speed_idx + 1)
+    self._update_status_display()
+
+  def _speed_down(self) -> None:
+    self._speed_idx = max(0, self._speed_idx - 1)
+    self._update_status_display()
+
+  def _reset_speed(self) -> None:
+    self._speed_idx = _SPEEDS.index(1.0)
+    self._update_status_display()
+
   def _setup_gui(self) -> None:
     tabs = self._server.gui.add_tab_group()
 
     with tabs.add_tab("Controls", icon=viser.Icon.SETTINGS):
       self._status_html = self._server.gui.add_html("")
 
-      pause_btn = self._server.gui.add_button(
+      self._pause_btn = self._server.gui.add_button(
         "Pause" if not self._paused else "Play",
         icon=(viser.Icon.PLAYER_PAUSE if not self._paused else viser.Icon.PLAYER_PLAY),
       )
 
-      @pause_btn.on_click
+      @self._pause_btn.on_click
       def _(_) -> None:
-        self._paused = not self._paused
-        if not self._paused:
-          self._budget = 0.0
-          self._last_tick = time.perf_counter()
-        pause_btn.label = "Pause" if not self._paused else "Play"
-        pause_btn.icon = (
-          viser.Icon.PLAYER_PAUSE if not self._paused else viser.Icon.PLAYER_PLAY
-        )
-        for sl, _ in self._joint_sliders:
-          sl.disabled = not self._paused
-        self._update_status_display()
+        self._toggle_pause()
 
       step_btn = self._server.gui.add_button("Step", icon=viser.Icon.PLAYER_TRACK_NEXT)
 
       @step_btn.on_click
       def _(_) -> None:
-        if self._paused:
-          with self._lock:
-            self._step_fn(self.model, self.data)
-            self._step_count += 1
-            self._render()
-            self._update_status_display()
+        self._single_step()
 
       reset_btn = self._server.gui.add_button("Reset")
 
       @reset_btn.on_click
       def _(_) -> None:
-        with self._lock:
-          self._reset()
-          self._step_count = 0
-          self._budget = 0.0
-          self._render()
-          self._update_status_display()
-        self._sync_sliders()
+        self._do_reset()
 
       speed_btns = self._server.gui.add_button_group(
         "Speed", options=["Slower", "1x", "Faster"]
@@ -313,12 +352,11 @@ class Viewer:
       @speed_btns.on_click
       def _(event) -> None:
         if event.target.value == "Slower":
-          self._speed_idx = max(0, self._speed_idx - 1)
+          self._speed_down()
         elif event.target.value == "Faster":
-          self._speed_idx = min(len(_SPEEDS) - 1, self._speed_idx + 1)
+          self._speed_up()
         else:
-          self._speed_idx = _SPEEDS.index(1.0)
-        self._update_status_display()
+          self._reset_speed()
 
       # Keyframe selector (only if model has keyframes).
       if self.model.nkey > 0:
@@ -356,6 +394,9 @@ class Viewer:
           def _(_) -> None:
             _load_keyframe()
 
+      # Interactive perturbation info.
+      self.scene.perturbation.setup_gui()
+
       # Scene controls (camera, environment).
       with self._server.gui.add_folder("Scene"):
         self.scene.create_scene_gui()
@@ -376,6 +417,29 @@ class Viewer:
     # Physics tab (disable/enable flags).
     with tabs.add_tab("Physics", icon=viser.Icon.ATOM):
       self._setup_physics_flags()
+
+    self._register_keybindings()
+
+  def _register_keybindings(self) -> None:
+    """Register keyboard shortcuts for simulation control."""
+    s = self._server
+
+    cmd = s.gui.add_command("Toggle Pause", hotkey="space")
+    cmd.on_trigger(lambda _: self._toggle_pause())
+
+    cmd = s.gui.add_command("Step Forward", hotkey="N")
+    cmd.on_trigger(lambda _: self._single_step())
+
+    cmd = s.gui.add_command("Reset", hotkey="backspace")
+    cmd.on_trigger(lambda _: self._do_reset())
+
+    cmd = s.gui.add_command("Speed Down")
+    cmd.on_trigger(lambda _: self._speed_down())
+
+    cmd = s.gui.add_command("Speed Up")
+    cmd.on_trigger(lambda _: self._speed_up())
+
+    self.scene.register_keybindings(s)
 
   _MAX_SLIDERS: int = 200
 
