@@ -22,6 +22,7 @@ from .conversions import (
   merge_geoms_hull,
   merge_sites,
 )
+from .interaction import PerturbationHandler
 
 
 @dataclasses.dataclass
@@ -183,6 +184,9 @@ class ViserMujocoScene:
 
     self.needs_update = False
     self.paused = False
+    self._vis_flag_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
+    self._simple_flag_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
+    self.perturbation = PerturbationHandler(server, mj_model, self.mj_data)
 
     # Cached visualization state for re-rendering when settings change.
     self._tracked_body_id: int | None = None
@@ -203,6 +207,7 @@ class ViserMujocoScene:
     mujoco.mj_kinematics(mj_model, self.mj_data)
     self._add_fixed_geometry()
     self._create_mesh_handles_by_group()
+    self._register_perturbation_handlers()
     self._add_fixed_sites()
     self._create_site_handles_by_group()
     self._compute_hull_body_meshes()
@@ -269,6 +274,12 @@ class ViserMujocoScene:
         handle.visible = value
       self._sync_visibilities()
 
+  def _register_perturbation_handlers(self) -> None:
+    """Attach drag handlers to mesh groups for interactive perturbation."""
+    self.perturbation.register_click_handler()
+    for mg in self._mesh_groups:
+      self.perturbation.register_drag_handlers(mg.handle, mg.body_ids)
+
   def set_refresh_handler(self, handler: Callable[[], None] | None) -> None:
     """Install a callback used to refresh cached visualization state."""
     with self._update_lock:
@@ -300,6 +311,7 @@ class ViserMujocoScene:
       mujoco.mj_kinematics(self.mj_model, self.mj_data)
       self._add_fixed_geometry()
       self._create_mesh_handles_by_group()
+      self._register_perturbation_handlers()
       self._add_fixed_sites()
       self._create_site_handles_by_group()
       self._compute_hull_body_meshes()
@@ -461,6 +473,22 @@ class ViserMujocoScene:
         for client in self.server.get_clients().values():
           client.camera.fov = np.radians(slider_fov.value)
 
+      if self.mj_model.ncam > 0:
+        cam_names = ["Free"]
+        for i in range(self.mj_model.ncam):
+          name = mj_id2name(self.mj_model, mjtObj.mjOBJ_CAMERA, i)
+          cam_names.append(name or f"camera_{i}")
+        self._camera_dropdown = self.server.gui.add_dropdown(
+          "Camera",
+          options=cam_names,
+          initial_value="Free",
+        )
+        self._camera_offset = _camera_offset
+
+        @self._camera_dropdown.on_update
+        def _(_) -> None:
+          self._apply_camera_selection()
+
       @self.server.on_client_connect
       def _(client: viser.ClientHandle) -> None:
         client.camera.fov = np.radians(slider_fov.value)
@@ -483,6 +511,7 @@ class ViserMujocoScene:
       """Add a vis-flag checkbox at the current GUI level."""
       _opt.flags[flag_idx] = int(initial)
       cb = self.server.gui.add_checkbox("Enabled", initial_value=initial)
+      self._vis_flag_checkboxes[flag_idx] = cb
 
       @cb.on_update
       def _(event, _idx=flag_idx) -> None:
@@ -699,6 +728,7 @@ class ViserMujocoScene:
 
     for label, flag_idx, initial in _simple_flags:
       cb = self.server.gui.add_checkbox(label, initial_value=initial)
+      self._simple_flag_checkboxes[flag_idx] = cb
 
       @cb.on_update
       def _(event, _idx=flag_idx) -> None:
@@ -801,6 +831,70 @@ class ViserMujocoScene:
     with tabs.add_tab("Groups", icon=viser.Icon.LAYERS_INTERSECT):
       self.create_groups_gui()
     return tabs
+
+  def _apply_camera_selection(self) -> None:
+    """Switch camera based on dropdown value."""
+    if not hasattr(self, "_camera_dropdown"):
+      return
+    name = self._camera_dropdown.value
+    if name == "Free":
+      self.camera_tracking_enabled = True
+      for client in self.server.get_clients().values():
+        client.camera.position = self._camera_offset
+        client.camera.look_at = np.zeros(3)
+      return
+
+    idx = self._camera_dropdown.options.index(name) - 1
+    mujoco.mj_forward(self.mj_model, self.mj_data)
+    pos = self.mj_data.cam_xpos[idx].copy()
+    mat = self.mj_data.cam_xmat[idx].reshape(3, 3)
+    look_dir = -mat[:, 2]
+    look_at = pos + look_dir * 3.0
+    self.camera_tracking_enabled = False
+    for client in self.server.get_clients().values():
+      client.camera.position = pos
+      client.camera.look_at = look_at
+
+  def _toggle_vis_flag(self, flag_idx: int) -> None:
+    """Toggle a visualization flag and sync the corresponding checkbox."""
+    new_val = not bool(self._mjv_option.flags[flag_idx])
+
+    def _mutate() -> None:
+      self._mjv_option.flags[flag_idx] = int(new_val)
+
+    cb = self._vis_flag_checkboxes.get(flag_idx) or self._simple_flag_checkboxes.get(
+      flag_idx
+    )
+    if cb is not None:
+      cb.value = new_val
+    else:
+      self._apply_visualization_change(_mutate)
+
+  def register_keybindings(self, server: viser.ViserServer) -> None:
+    """Register single-letter keyboard shortcuts for visualization toggles."""
+    _flag_keys: list[tuple[str, str, int]] = [
+      ("Toggle Contacts", "C", int(mujoco.mjtVisFlag.mjVIS_CONTACTPOINT)),
+      ("Toggle Forces", "F", int(mujoco.mjtVisFlag.mjVIS_CONTACTFORCE)),
+      ("Toggle Joints", "J", int(mujoco.mjtVisFlag.mjVIS_JOINT)),
+      ("Toggle Inertia", "I", int(mujoco.mjtVisFlag.mjVIS_INERTIA)),
+      ("Toggle Tendons", "V", int(mujoco.mjtVisFlag.mjVIS_TENDON)),
+      ("Toggle COM", "M", int(mujoco.mjtVisFlag.mjVIS_COM)),
+      ("Toggle Actuators", "U", int(mujoco.mjtVisFlag.mjVIS_ACTUATOR)),
+      ("Toggle Constraints", "T", int(mujoco.mjtVisFlag.mjVIS_CONSTRAINT)),
+    ]
+    for label, key, flag_idx in _flag_keys:
+      cmd = server.gui.add_command(label, hotkey=key)  # type: ignore[arg-type]
+      cmd.on_trigger(lambda _, _idx=flag_idx: self._toggle_vis_flag(_idx))
+
+    cmd = server.gui.add_command("Free Camera", hotkey="escape")
+    cmd.on_trigger(lambda _: self._set_free_camera())
+
+  def _set_free_camera(self) -> None:
+    """Switch to free camera mode."""
+    if hasattr(self, "_camera_dropdown"):
+      self._camera_dropdown.value = "Free"
+    else:
+      self.camera_tracking_enabled = True
 
   def update_from_arrays(
     self,
@@ -942,6 +1036,11 @@ class ViserMujocoScene:
     self._scene_offset = scene_offset
     if mj_data is not None:
       self._last_mj_data = mj_data
+
+    body_xmat_3x3 = body_xmat
+    if body_xmat_3x3.ndim == 3 and body_xmat_3x3.shape[-1] == 9:
+      body_xmat_3x3 = body_xmat_3x3.reshape(*body_xmat_3x3.shape[:-1], 3, 3)
+    self.perturbation.update_state(body_xpos, body_xmat_3x3, env_idx, scene_offset)
 
     self.fixed_bodies_frame.position = scene_offset
     slice_single = self.show_only_selected and self.num_envs > 1
