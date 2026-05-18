@@ -51,6 +51,16 @@ class PerturbationHandler:
 
     self._info_text: viser.GuiTextHandle | None = None
 
+    # Grab-point velocity, computed once per render frame in
+    # ``update_state`` and reused across all physics substeps that
+    # frame. Computing it inside ``get_perturbation`` (which runs once
+    # per substep) was both wasteful and noisy: the cached body pose
+    # only refreshes between render frames, so substeps 2..N within
+    # a frame would see zero motion divided by a sub-millisecond
+    # wall-clock dt -- damping collapsed to zero for most substeps and
+    # spiked on the first one. Render-frame cadence matches the rate
+    # at which the grab point actually moves on screen.
+    self._grab_vel: np.ndarray = np.zeros(3)
     self._prev_grab_world: np.ndarray | None = None
     self._prev_time: float | None = None
 
@@ -61,37 +71,21 @@ class PerturbationHandler:
         "Body", initial_value="(none)", disabled=True
       )
 
-  def register_click_handler(self) -> None:
-    """Register scene-level click handler for body selection via ray cast."""
-
-    @self._server.scene.on_click()
-    def _(event: viser.SceneClickEvent) -> None:
-      origin = np.array(event.ray_origin) - self._scene_offset
-      direction = np.array(event.ray_direction)
-      geomid = np.zeros(1, dtype=np.int32)
-      dist = mujoco.mj_ray(
-        self._model,
-        self._data,
-        origin,
-        direction,
-        None,
-        1,
-        -1,
-        geomid,
-      )
-      if dist < 0:
-        with self._lock:
-          self.selected_body_id = None
-        if self._info_text is not None:
-          self._info_text.value = "(none)"
-        return
-
-      body_id = int(self._model.geom_bodyid[geomid[0]])
-      with self._lock:
-        self.selected_body_id = body_id
-      name = mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_BODY, body_id)
-      if self._info_text is not None:
-        self._info_text.value = name or f"body_{body_id}"
+  def clear(self) -> None:
+    """Drop selection and any in-flight drag. Call on reset or after
+    the model is rebuilt -- otherwise a cached body id can outlive the
+    body it pointed to (out-of-range index, silently retargets a
+    different body) and the GUI label keeps showing a stale name."""
+    with self._lock:
+      self.selected_body_id = None
+      self._drag_body_id = None
+      self._drag_grab_local = None
+      self._drag_target = None
+      self._drag_mode = None
+      self._prev_grab_world = None
+      self._prev_time = None
+    if self._info_text is not None:
+      self._info_text.value = "(none)"
 
   def register_drag_handlers(
     self,
@@ -99,6 +93,14 @@ class PerturbationHandler:
     body_ids: np.ndarray,
   ) -> None:
     """Attach drag and click handlers to a batched mesh handle."""
+    # Skip groups whose only body is the world body (id 0): perturbing
+    # it is meaningless, and registering any handler makes the mesh
+    # "interactive" in viser -- which flips the cursor to "pointer"
+    # whenever the user hovers it. The world body holds the ground
+    # plane, which spans the visible canvas, so the pointer cursor
+    # would show across the entire scene.
+    if not bool(np.any(body_ids != 0)):
+      return
     n_bodies = len(body_ids)
 
     def _body_id_from_event(
@@ -123,75 +125,48 @@ class PerturbationHandler:
       if self._info_text is not None:
         self._info_text.value = name or f"body_{bid}"
 
-    @handle.on_drag_start("left", modifier="cmd/ctrl")
-    async def _(event: viser.SceneNodeDragEvent) -> None:  # type: ignore[type-arg]
-      bid = _body_id_from_event(event)
-      if bid is None or bid == 0:
-        return
-      grab_world = np.array(event.start_position) - self._scene_offset
-      grab_local = self._world_to_body_local(bid, grab_world)
-      with self._lock:
-        self._drag_body_id = bid
-        self._drag_grab_local = grab_local
-        self._drag_target = grab_world
-        self._drag_mode = "translate"
-        self.selected_body_id = bid
-        self._prev_grab_world = grab_world.copy()
-        self._prev_time = time.perf_counter()
-      name = mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_BODY, bid)
-      if self._info_text is not None:
-        self._info_text.value = name or f"body_{bid}"
+    def _make_drag_handler(mode: str):
+      async def _handler(event: viser.SceneNodeDragEvent) -> None:  # type: ignore[type-arg]
+        if event.phase == "start":
+          bid = _body_id_from_event(event)
+          if bid is None or bid == 0:
+            return
+          # Target and grab position are tracked in viser-world frame
+          # (no scene_offset subtraction) so that camera tracking,
+          # which shifts scene_offset every frame, doesn't drift the
+          # target between throttled mouse-move events. Body-local
+          # offset still needs mujoco-frame coords for the conversion.
+          target_viser = np.array(event.start_position)
+          grab_world_mj = target_viser - self._scene_offset
+          grab_local = self._world_to_body_local(bid, grab_world_mj)
+          with self._lock:
+            self._drag_body_id = bid
+            self._drag_grab_local = grab_local
+            self._drag_target = target_viser
+            self._drag_mode = mode
+            self.selected_body_id = bid
+            self._prev_grab_world = target_viser.copy()
+            self._prev_time = time.perf_counter()
+          name = mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_BODY, bid)
+          if self._info_text is not None:
+            self._info_text.value = name or f"body_{bid}"
+        elif event.phase == "update":
+          with self._lock:
+            if self._drag_body_id is not None:
+              self._drag_target = np.array(event.end_position)
+        else:  # "end"
+          with self._lock:
+            self._drag_body_id = None
+            self._drag_grab_local = None
+            self._drag_target = None
+            self._drag_mode = None
+            self._prev_grab_world = None
+            self._prev_time = None
 
-    @handle.on_drag_update("left", modifier="cmd/ctrl")
-    async def _(event: viser.SceneNodeDragEvent) -> None:  # type: ignore[type-arg]
-      with self._lock:
-        if self._drag_body_id is not None:
-          self._drag_target = np.array(event.end_position) - self._scene_offset
+      return _handler
 
-    @handle.on_drag_end("left", modifier="cmd/ctrl")
-    async def _(_: viser.SceneNodeDragEvent) -> None:  # type: ignore[type-arg]
-      with self._lock:
-        self._drag_body_id = None
-        self._drag_grab_local = None
-        self._drag_target = None
-        self._drag_mode = None
-        self._prev_grab_world = None
-        self._prev_time = None
-
-    @handle.on_drag_start("left", modifier="cmd/ctrl+shift")
-    async def _(event: viser.SceneNodeDragEvent) -> None:  # type: ignore[type-arg]
-      bid = _body_id_from_event(event)
-      if bid is None or bid == 0:
-        return
-      grab_world = np.array(event.start_position) - self._scene_offset
-      grab_local = self._world_to_body_local(bid, grab_world)
-      with self._lock:
-        self._drag_body_id = bid
-        self._drag_grab_local = grab_local
-        self._drag_target = grab_world
-        self._drag_mode = "rotate"
-        self.selected_body_id = bid
-        self._prev_grab_world = grab_world.copy()
-        self._prev_time = time.perf_counter()
-      name = mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_BODY, bid)
-      if self._info_text is not None:
-        self._info_text.value = name or f"body_{bid}"
-
-    @handle.on_drag_update("left", modifier="cmd/ctrl+shift")
-    async def _(event: viser.SceneNodeDragEvent) -> None:  # type: ignore[type-arg]
-      with self._lock:
-        if self._drag_body_id is not None:
-          self._drag_target = np.array(event.end_position) - self._scene_offset
-
-    @handle.on_drag_end("left", modifier="cmd/ctrl+shift")
-    async def _(_: viser.SceneNodeDragEvent) -> None:  # type: ignore[type-arg]
-      with self._lock:
-        self._drag_body_id = None
-        self._drag_grab_local = None
-        self._drag_target = None
-        self._drag_mode = None
-        self._prev_grab_world = None
-        self._prev_time = None
+    handle.on_drag("left", modifier="cmd/ctrl")(_make_drag_handler("translate"))
+    handle.on_drag("left", modifier="cmd/ctrl+shift")(_make_drag_handler("rotate"))
 
   def update_state(
     self,
@@ -208,9 +183,34 @@ class PerturbationHandler:
       env_idx: Active environment index.
       scene_offset: Current camera tracking offset.
     """
-    self._body_xpos = body_xpos[env_idx]
-    self._body_xmat = body_xmat[env_idx]
+    xpos_env = body_xpos[env_idx]
+    xmat_env = body_xmat[env_idx]
+    self._body_xpos = xpos_env
+    self._body_xmat = xmat_env
     self._scene_offset = scene_offset
+
+    # Refresh the grab-point velocity once per render frame against
+    # the new pose. Substeps within the next frame all consume this
+    # cached value -- see ``_grab_vel`` field comment.
+    bid = self._drag_body_id
+    if bid is None or self._drag_grab_local is None or bid >= xpos_env.shape[0]:
+      self._grab_vel = np.zeros(3)
+      self._prev_grab_world = None
+      self._prev_time = None
+      return
+    # Velocity is measured in viser-world frame -- the same frame the
+    # cursor (and therefore _drag_target) lives in -- so damping
+    # actually opposes motion *relative to the target*. With camera
+    # tracking on, the dragged body sits near the viser origin and
+    # mujoco-frame velocity would diverge from screen-frame velocity.
+    grab_world = xpos_env[bid] + xmat_env[bid] @ self._drag_grab_local + scene_offset
+    now = time.perf_counter()
+    if self._prev_grab_world is not None and self._prev_time is not None:
+      dt = now - self._prev_time
+      if dt > 1e-6:
+        self._grab_vel = (grab_world - self._prev_grab_world) / dt
+    self._prev_grab_world = grab_world.copy()
+    self._prev_time = now
 
   def get_perturbation(self) -> PerturbationState | None:
     """Return the current perturbation force using MuJoCo's spring model."""
@@ -225,25 +225,36 @@ class PerturbationHandler:
         return None
 
       bid = self._drag_body_id
+      # Bounds-check against the *current* model: if the model was
+      # rebuilt mid-drag, the cached body id may now reference a
+      # different body or be out of range entirely. Drop the drag
+      # silently rather than indexing past the end.
+      if bid >= self._body_xpos.shape[0] or bid >= self._model.nbody:
+        self._drag_body_id = None
+        self._drag_grab_local = None
+        self._drag_target = None
+        self._drag_mode = None
+        self._prev_grab_world = None
+        self._prev_time = None
+        return None
       xpos = self._body_xpos[bid]
       xmat = self._body_xmat[bid]
 
-      grab_world = xpos + xmat @ self._drag_grab_local
+      grab_world_mj = xpos + xmat @ self._drag_grab_local
+      # Displacement is computed in viser-world frame (cursor frame).
+      # Force/torque vectors are unchanged by the pure-translation
+      # offset, so we apply them in mujoco frame as-is; only the
+      # application point passed to mj_applyFT needs mujoco coords.
+      grab_world = grab_world_mj + self._scene_offset
       diff = grab_world - self._drag_target
 
       # Compute localmass from body_invweight0 (translational inverse weight).
       invweight_trn = float(self._model.body_invweight0[bid, 0])
       localmass = 1.0 if invweight_trn == 0 else 1.0 / max(invweight_trn, 1e-10)
 
-      # Estimate velocity of the grab point via finite difference.
-      now = time.perf_counter()
-      vel = np.zeros(3)
-      if self._prev_grab_world is not None and self._prev_time is not None:
-        dt = now - self._prev_time
-        if dt > 1e-6:
-          vel = (grab_world - self._prev_grab_world) / dt
-      self._prev_grab_world = grab_world.copy()
-      self._prev_time = now
+      # Velocity is refreshed per render frame in ``update_state``;
+      # we just read the cached value here.
+      vel = self._grab_vel
 
       if self._drag_mode == "translate":
         stiffness = float(self._model.vis.map.stiffness)
@@ -252,8 +263,8 @@ class PerturbationHandler:
         # Critical damping: -2*sqrt(k)*m * velocity.
         force -= np.sqrt(stiffness) * localmass * vel
 
-        # Torque from moment arm.
-        moment_arm = grab_world - xpos
+        # Torque from moment arm (mujoco-frame coords).
+        moment_arm = grab_world_mj - xpos
         torque = np.cross(moment_arm, force)
       else:
         stiffnessrot = float(self._model.vis.map.stiffnessrot)
@@ -271,7 +282,7 @@ class PerturbationHandler:
         body_id=bid,
         force=force,
         torque=torque,
-        point=grab_world,
+        point=grab_world_mj,
       )
 
   def _world_to_body_local(self, body_id: int, world_pos: np.ndarray) -> np.ndarray:

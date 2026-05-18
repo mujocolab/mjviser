@@ -276,7 +276,6 @@ class ViserMujocoScene:
 
   def _register_perturbation_handlers(self) -> None:
     """Attach drag handlers to mesh groups for interactive perturbation."""
-    self.perturbation.register_click_handler()
     for mg in self._mesh_groups:
       self.perturbation.register_drag_handlers(mg.handle, mg.body_ids)
 
@@ -288,6 +287,12 @@ class ViserMujocoScene:
   def rebuild_visual_handles(self) -> None:
     """Rebuild handles whose geometry or appearance is baked at creation time."""
     with self._update_lock:
+      # Drop selection / drag state before mesh handles are torn down:
+      # body ids may not survive a rebuild, and an in-flight drag
+      # holding a stale id would silently retarget a different body
+      # (or index out of range) on the next physics step.
+      self.perturbation.clear()
+
       for group in self._mesh_groups:
         group.handle.remove()
       self._mesh_groups.clear()
