@@ -87,6 +87,12 @@ class Viewer:
     self._dirty = True
     self._step_count = 0
 
+    # Snapshot of ``qfrc_applied`` taken just before the perturbation
+    # adds its force, so we can undo our addition before the next step
+    # without clobbering user-supplied generalized forces. ``None``
+    # means no perturbation force is currently in flight.
+    self._pert_saved_qfrc: np.ndarray | None = None
+
     # Timing.
     self._budget = 0.0
     self._last_tick = 0.0
@@ -201,21 +207,32 @@ class Viewer:
     self._update_stats()
 
   def _apply_perturbation(self) -> None:
-    """Apply any pending interactive perturbation force."""
+    """Apply any pending interactive perturbation force.
+
+    ``mj_applyFT`` *adds* to ``qfrc_applied`` rather than overwriting
+    it, so a force applied last substep would compound this substep
+    if we just called it again. We undo the previous addition by
+    restoring a pre-perturbation snapshot, then re-snapshot and re-add
+    on top -- which preserves any user-supplied ``qfrc_applied``
+    (a documented MuJoCo extension point) instead of zeroing it out.
+    """
+    if self._pert_saved_qfrc is not None:
+      self.data.qfrc_applied[:] = self._pert_saved_qfrc
+      self._pert_saved_qfrc = None
+
     pert = self.scene.perturbation.get_perturbation()
-    if pert is not None:
-      self.data.qfrc_applied[:] = 0.0
-      mujoco.mj_applyFT(
-        self.model,
-        self.data,
-        pert.force,
-        pert.torque,
-        pert.point,
-        pert.body_id,
-        self.data.qfrc_applied,
-      )
-    else:
-      self.data.qfrc_applied[:] = 0.0
+    if pert is None:
+      return
+    self._pert_saved_qfrc = self.data.qfrc_applied.copy()
+    mujoco.mj_applyFT(
+      self.model,
+      self.data,
+      pert.force,
+      pert.torque,
+      pert.point,
+      pert.body_id,
+      self.data.qfrc_applied,
+    )
 
   def _step_physics(self, dt: float) -> bool:
     """Run physics steps for this frame's sim-time budget.
@@ -302,6 +319,11 @@ class Viewer:
       self._reset()
       self._step_count = 0
       self._budget = 0.0
+      # Drop any in-flight drag and the saved-qfrc snapshot: the
+      # snapshot was taken against the pre-reset state and would
+      # otherwise be restored on top of the freshly-reset data.
+      self.scene.perturbation.clear()
+      self._pert_saved_qfrc = None
       self._render()
       self._update_status_display()
     self._sync_sliders()
