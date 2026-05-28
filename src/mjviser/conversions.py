@@ -22,6 +22,11 @@ def _get_texture_id(mj_model: mujoco.MjModel, matid: int) -> int:
   return texid
 
 
+def _get_texture_normalmap_id(mj_model: mujoco.MjModel, matid: int) -> int:
+  """Returns the normalmap texture ID for a material, or -1."""
+  return int(mj_model.mat_texid[matid, int(mujoco.mjtTextureRole.mjTEXROLE_NORMAL)])
+
+
 def _extract_texture_image(mj_model: mujoco.MjModel, texid: int) -> Image.Image | None:
   """Extract a 2D texture as a PIL Image, or None for unsupported types."""
   w = mj_model.tex_width[texid]
@@ -190,16 +195,27 @@ def mujoco_mesh_to_trimesh(mj_model: mujoco.MjModel, geom_idx: int) -> trimesh.T
 
   # Path 1: mesh has UVs and material has a 2D texture.
   if uvs is not None and matid >= 0:
-    texid = _get_texture_id(mj_model, matid)
-    if texid >= 0:
-      image = _extract_texture_image(mj_model, texid)
-      if image is not None:
+    texid_albedo = _get_texture_id(mj_model, matid)
+    texid_normalmap = _get_texture_normalmap_id(mj_model, matid)
+    if texid_albedo >= 0:
+      image_albedo = _extract_texture_image(mj_model, texid_albedo)
+      image_normalmap: Image.Image | None = None
+      if image_normalmap_flipped := _extract_texture_image(mj_model, texid_normalmap):
+        image_normalmap = image_normalmap_flipped.transpose(
+          Image.Transpose.FLIP_TOP_BOTTOM
+        )
+
+      if image_albedo is not None:
         rgba = mj_model.mat_rgba[matid]
+        geom_rgba = mj_model.geom_rgba[geom_idx]
+        use_blending = rgba[-1] < 0.99 or geom_rgba[-1] < 0.99
         material = trimesh.visual.material.PBRMaterial(
           baseColorFactor=rgba,
-          baseColorTexture=image,
+          baseColorTexture=image_albedo,
           metallicFactor=0.0,
           roughnessFactor=1.0,
+          normalTexture=image_normalmap,
+          alphaMode="BLEND" if use_blending else "OPAQUE",
         )
         mesh.visual = trimesh.visual.TextureVisuals(uv=uvs, material=material)
         return mesh
