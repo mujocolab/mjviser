@@ -197,28 +197,31 @@ def mujoco_mesh_to_trimesh(mj_model: mujoco.MjModel, geom_idx: int) -> trimesh.T
   if uvs is not None and matid >= 0:
     texid_albedo = _get_texture_id(mj_model, matid)
     texid_normalmap = _get_texture_normalmap_id(mj_model, matid)
+
+    image_albedo: Image.Image | None = None
+    image_normalmap: Image.Image | None = None
     if texid_albedo >= 0:
       image_albedo = _extract_texture_image(mj_model, texid_albedo)
-      image_normalmap: Image.Image | None = None
+    if texid_normalmap >= 0:
       if image_normalmap_flipped := _extract_texture_image(mj_model, texid_normalmap):
         image_normalmap = image_normalmap_flipped.transpose(
           Image.Transpose.FLIP_TOP_BOTTOM
         )
 
-      if image_albedo is not None:
-        rgba = mj_model.mat_rgba[matid]
-        geom_rgba = mj_model.geom_rgba[geom_idx]
-        use_blending = rgba[-1] < 0.99 or geom_rgba[-1] < 0.99
-        material = trimesh.visual.material.PBRMaterial(
-          baseColorFactor=rgba,
-          baseColorTexture=image_albedo,
-          metallicFactor=0.0,
-          roughnessFactor=1.0,
-          normalTexture=image_normalmap,
-          alphaMode="BLEND" if use_blending else "OPAQUE",
-        )
-        mesh.visual = trimesh.visual.TextureVisuals(uv=uvs, material=material)
-        return mesh
+    if image_albedo is not None:
+      rgba = mj_model.mat_rgba[matid]
+      geom_rgba = mj_model.geom_rgba[geom_idx]
+      use_blending = rgba[-1] < 0.99 or geom_rgba[-1] < 0.99
+      material = trimesh.visual.material.PBRMaterial(
+        baseColorFactor=rgba,
+        baseColorTexture=image_albedo,
+        metallicFactor=0.0,
+        roughnessFactor=1.0,
+        normalTexture=image_normalmap,
+        alphaMode="BLEND" if use_blending else "OPAQUE",
+      )
+      mesh.visual = trimesh.visual.TextureVisuals(uv=uvs, material=material)
+      return mesh
 
   # Path 2: no UVs, try cube map projection.
   if uvs is None and matid >= 0:
