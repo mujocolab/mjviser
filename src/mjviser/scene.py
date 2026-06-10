@@ -187,8 +187,9 @@ class ViserMujocoScene:
     self._vis_flag_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
     self._simple_flag_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
     self._geom_group_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
-    self._site_group_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
-    self.perturbation = PerturbationHandler(server, mj_model, self.mj_data)
+    self._camera_dropdown: viser.GuiDropdownHandle[str] | None = None
+    self._camera_offset = np.zeros(3)
+    self.perturbation = PerturbationHandler(server, mj_model)
 
     # Cached visualization state for re-rendering when settings change.
     self._tracked_body_id: int | None = None
@@ -790,7 +791,6 @@ class ViserMujocoScene:
           initial_value=self.site_groups_visible[i],
           hint=f"Show/hide sites in group {i}",
         )
-        self._site_group_checkboxes[i] = cb
 
         @cb.on_update
         def _(event, group_idx=i) -> None:
@@ -852,7 +852,7 @@ class ViserMujocoScene:
 
   def _apply_camera_selection(self) -> None:
     """Switch camera based on dropdown value."""
-    if not hasattr(self, "_camera_dropdown"):
+    if self._camera_dropdown is None:
       return
     name = self._camera_dropdown.value
     if name == "Free":
@@ -888,8 +888,9 @@ class ViserMujocoScene:
     else:
       self._apply_visualization_change(_mutate)
 
-  def register_keybindings(self, server: viser.ViserServer) -> None:
+  def register_keybindings(self) -> None:
     """Register single-letter keyboard shortcuts for visualization toggles."""
+    server = self.server
     _flag_keys: list[tuple[str, str, int]] = [
       ("Toggle Contacts", "C", int(mujoco.mjtVisFlag.mjVIS_CONTACTPOINT)),
       ("Toggle Forces", "F", int(mujoco.mjtVisFlag.mjVIS_CONTACTFORCE)),
@@ -904,24 +905,17 @@ class ViserMujocoScene:
       cmd = server.gui.add_command(label, hotkey=key)  # type: ignore[arg-type]
       cmd.on_trigger(lambda _, _idx=flag_idx: self._toggle_vis_flag(_idx))
 
-    # Number keys toggle geom groups; shift+number toggles site groups
-    # (mirrors MuJoCo simulate).
+    # Number keys toggle geom groups. (MuJoCo simulate also maps shift+number
+    # to site groups, but viser routes hotkeys through event.key, where
+    # shift+digit is a symbol, not a digit -- so that binding can't be
+    # expressed here. Use the Groups GUI checkboxes for sites.)
     for i in range(6):
-      digit = str(i)
       geom_cmd = server.gui.add_command(
         f"Toggle Geom Group {i}",
-        hotkey=digit,  # type: ignore[arg-type]
+        hotkey=str(i),  # type: ignore[arg-type]
       )
       geom_cmd.on_trigger(
         lambda _, _idx=i: self._toggle_group(self._geom_group_checkboxes, _idx)
-      )
-      site_cmd = server.gui.add_command(
-        f"Toggle Site Group {i}",
-        hotkey=digit,  # type: ignore[arg-type]
-        modifier="shift",
-      )
-      site_cmd.on_trigger(
-        lambda _, _idx=i: self._toggle_group(self._site_group_checkboxes, _idx)
       )
 
     cmd = server.gui.add_command("Free Camera", hotkey="escape")
@@ -937,7 +931,7 @@ class ViserMujocoScene:
 
   def _set_free_camera(self) -> None:
     """Switch to free camera mode."""
-    if hasattr(self, "_camera_dropdown"):
+    if self._camera_dropdown is not None:
       self._camera_dropdown.value = "Free"
     else:
       self.camera_tracking_enabled = True

@@ -42,7 +42,7 @@ def env():
   data = mujoco.MjData(model)
   mujoco.mj_forward(model, data)
   server = viser.ViserServer(port=0)
-  handler = PerturbationHandler(server, model, data)
+  handler = PerturbationHandler(server, model)
   yield handler, model, data
   _stop(server)
 

@@ -38,11 +38,12 @@ class PerturbationHandler:
     self,
     server: viser.ViserServer,
     mj_model: mujoco.MjModel,
-    mj_data: mujoco.MjData,
   ) -> None:
+    # The live MjData flows in per call (apply/update_state); the handler only
+    # keeps the static model, since the data it acts on is the viewer's, not
+    # the scene's.
     self._server = server
     self._model = mj_model
-    self._data = mj_data
     self._lock = Lock()
 
     self.selected_body_id: int | None = None
@@ -99,21 +100,25 @@ class PerturbationHandler:
     """
     with self._lock:
       self.selected_body_id = None
-      self._drag_body_id = None
-      self._grab_local = None
-      self._target_viser = None
-      self._drag_rotate = False
-      self._rotate_delta_quat = None
-      self._rotate_initial_quat = None
-      self._rotate_anchor = None
-      self._rotate_aabb_center = None
-      self._rotate_aabb_half = None
-      self._rotate_world_quat = None
-      self._pert.active = 0
+      self._reset_drag_state()
     self._hide_connector()
     self._hide_ghost()
     if self._info_text is not None:
       self._info_text.value = "(none)"
+
+  def _reset_drag_state(self) -> None:
+    """Clear all in-flight drag state. The caller holds ``self._lock``."""
+    self._drag_body_id = None
+    self._grab_local = None
+    self._target_viser = None
+    self._drag_rotate = False
+    self._rotate_delta_quat = None
+    self._rotate_initial_quat = None
+    self._rotate_anchor = None
+    self._rotate_aabb_center = None
+    self._rotate_aabb_half = None
+    self._rotate_world_quat = None
+    self._pert.active = 0
 
   def register_drag_handlers(
     self,
@@ -129,6 +134,9 @@ class PerturbationHandler:
     n_bodies = len(body_ids)
 
     def _body_id(idx: int | None) -> int | None:
+      # The batched handle lays instances out as (num_envs, n_bodies)
+      # flattened, so any env's instance maps back to its body via modulo.
+      # The drag always acts on the active env (the pose we cache).
       if idx is None:
         return None
       return int(body_ids[idx % n_bodies])
@@ -175,17 +183,7 @@ class PerturbationHandler:
 
   def _end_drag(self) -> None:
     with self._lock:
-      self._drag_body_id = None
-      self._grab_local = None
-      self._target_viser = None
-      self._drag_rotate = False
-      self._rotate_delta_quat = None
-      self._rotate_initial_quat = None
-      self._rotate_anchor = None
-      self._rotate_aabb_center = None
-      self._rotate_aabb_half = None
-      self._rotate_world_quat = None
-      self._pert.active = 0
+      self._reset_drag_state()
     self._hide_connector()
     self._hide_ghost()
 
@@ -322,10 +320,7 @@ class PerturbationHandler:
         self._clear_applied(data)
         return False
 
-      xmat = data.xmat[bid].reshape(3, 3)
-      selpos = data.xpos[bid] + xmat @ self._grab_local
       target = self._target_viser - self._scene_offset
-
       self._pert.localpos = self._grab_local
 
       if paused:
@@ -333,6 +328,8 @@ class PerturbationHandler:
         # target, keeping orientation. mjv_applyPerturbPose moves free
         # joints / mocap bodies and is a no-op for anything else.
         self._clear_applied(data)
+        xmat = data.xmat[bid].reshape(3, 3)
+        selpos = data.xpos[bid] + xmat @ self._grab_local
         xiquat = np.empty(4)
         mujoco.mju_mulQuat(xiquat, data.xquat[bid], model.body_iquat[bid])
         self._pert.active = int(mujoco.mjtPertBit.mjPERT_TRANSLATE)

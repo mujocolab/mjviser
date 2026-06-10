@@ -430,7 +430,7 @@ class Viewer:
     cmd = s.gui.add_command("Speed Up")
     cmd.on_trigger(lambda _: self._speed_up())
 
-    self.scene.register_keybindings(s)
+    self.scene.register_keybindings()
 
   _MAX_SLIDERS: int = 200
 
