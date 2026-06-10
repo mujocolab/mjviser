@@ -20,6 +20,7 @@ from mjviser.conversions import (
   create_primitive_mesh,
   create_site_mesh,
   get_body_name,
+  get_geom_texture_id,
   group_geoms_by_visual_compat,
   is_fixed_body,
   merge_geoms,
@@ -129,9 +130,13 @@ def test_cubemap_mesh_to_trimesh(cubemap_model):
 # 2D textures: normal maps and blending
 
 
-def _pbr_material(mesh):
+def _texture_visual(mesh):
   assert isinstance(mesh.visual, trimesh.visual.TextureVisuals)
-  mat = mesh.visual.material
+  return mesh.visual
+
+
+def _pbr_material(mesh):
+  mat = _texture_visual(mesh).material
   assert isinstance(mat, trimesh.visual.material.PBRMaterial)
   return mat
 
@@ -172,6 +177,113 @@ def test_extract_texture_flip(textured_model):
   flipped = np.asarray(_extract_texture_image(textured_model, texid, flip=True))
   unflipped = np.asarray(_extract_texture_image(textured_model, texid, flip=False))
   assert np.array_equal(unflipped, np.flipud(flipped))
+
+
+# Cube map textures on box primitives
+
+
+_CUBEMAP_BOX_XML = """
+<mujoco>
+  <asset>
+    <texture name="cubetex" type="cube" builtin="flat" mark="cross"
+             width="32" height="32" rgb1="0.8 0.2 0.2" markrgb="1 1 1"/>
+    <texture name="tex2d" type="2d" builtin="checker"
+             width="32" height="32" rgb1="0.8 0.2 0.2" rgb2="0.2 0.2 0.8"/>
+    <material name="cubemat" texture="cubetex"/>
+    <material name="flatmat" texture="tex2d"/>
+  </asset>
+  <worldbody>
+    <geom name="cube" type="box" size="0.05 0.06 0.07" material="cubemat"/>
+    <geom name="plain" type="box" size="0.05 0.05 0.05" rgba="1 0 0 1"/>
+    <geom name="box2d" type="box" size="0.05 0.05 0.05" material="flatmat"/>
+  </worldbody>
+</mujoco>
+"""
+
+# MuJoCo cube face order with the outward axis each face sits on.
+_CUBE_FACE_AXES = (
+  (0, (1, 0, 0)),
+  (1, (-1, 0, 0)),
+  (2, (0, 1, 0)),
+  (3, (0, -1, 0)),
+  (4, (0, 0, 1)),
+  (5, (0, 0, -1)),
+)
+
+
+def test_cubemap_box_mesh_structure():
+  # A box with a cube map material becomes a textured 6-quad mesh whose
+  # triangles all wind outward (closed, positive-volume box).
+  model = mujoco.MjModel.from_xml_string(_CUBEMAP_BOX_XML)
+  mesh = create_primitive_mesh(model, 0)
+  material = _pbr_material(mesh)
+  assert mesh.vertices.shape == (24, 3)
+  assert mesh.faces.shape == (12, 3)
+  assert _texture_visual(mesh).uv.shape == (24, 2)
+  # 6 square faces stacked into a vertical strip: atlas is (w, 6*w).
+  atlas = material.baseColorTexture
+  assert atlas is not None and atlas.size == (32, 192)
+  assert mesh.volume > 0
+  assert mesh.is_winding_consistent
+
+
+def test_cubemap_box_extents_match_geom_size():
+  # The textured box spans the full geom size on every axis.
+  model = mujoco.MjModel.from_xml_string(_CUBEMAP_BOX_XML)
+  mesh = create_primitive_mesh(model, 0)
+  lo, hi = mesh.bounds
+  np.testing.assert_allclose(hi, [0.05, 0.06, 0.07])
+  np.testing.assert_allclose(lo, [-0.05, -0.06, -0.07])
+
+
+def test_cubemap_box_face_order_and_placement():
+  # Paint each cube face a distinct color, then check each quad sits on the
+  # correct outward axis and samples its own face color from the atlas.
+  model = mujoco.MjModel.from_xml_string(_CUBEMAP_BOX_XML)
+  colors = np.array(
+    [
+      [200, 0, 0],
+      [0, 200, 0],
+      [0, 0, 200],
+      [200, 200, 0],
+      [200, 0, 200],
+      [0, 200, 200],
+    ],
+    dtype=np.uint8,
+  )
+  w = int(model.tex_width[0])
+  adr = int(model.tex_adr[0])
+  for i, color in enumerate(colors):
+    start = adr + i * w * w * 3
+    model.tex_data[start : start + w * w * 3] = np.tile(color, w * w)
+
+  mesh = create_primitive_mesh(model, 0)
+  atlas = np.asarray(_pbr_material(mesh).baseColorTexture)
+  uv = _texture_visual(mesh).uv
+  for fi, axis in _CUBE_FACE_AXES:
+    quad = slice(fi * 4, fi * 4 + 4)
+    centroid = mesh.vertices[quad].mean(axis=0)
+    direction = centroid / np.linalg.norm(centroid)
+    np.testing.assert_allclose(direction, axis, atol=1e-6)
+    u, v = uv[quad].mean(axis=0)
+    px = min(int(u * atlas.shape[1]), atlas.shape[1] - 1)
+    py = min(int((1.0 - v) * atlas.shape[0]), atlas.shape[0] - 1)
+    np.testing.assert_allclose(atlas[py, px], colors[fi], atol=2)
+
+
+def test_box_without_cube_map_is_flat_colored():
+  # Plain boxes and boxes with a 2D (non-cube) texture keep the flat fallback.
+  model = mujoco.MjModel.from_xml_string(_CUBEMAP_BOX_XML)
+  assert isinstance(create_primitive_mesh(model, 1).visual, trimesh.visual.ColorVisuals)
+  assert isinstance(create_primitive_mesh(model, 2).visual, trimesh.visual.ColorVisuals)
+
+
+def test_get_geom_texture_id_cube_map_box():
+  # Boxes group by cube map texture; plain and 2D-textured boxes do not.
+  model = mujoco.MjModel.from_xml_string(_CUBEMAP_BOX_XML)
+  assert get_geom_texture_id(model, 0) == 0
+  assert get_geom_texture_id(model, 1) == -1
+  assert get_geom_texture_id(model, 2) == -1
 
 
 # Mesh merging
