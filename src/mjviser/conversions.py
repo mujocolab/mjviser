@@ -27,22 +27,41 @@ def _get_texture_normalmap_id(mj_model: mujoco.MjModel, matid: int) -> int:
   return int(mj_model.mat_texid[matid, int(mujoco.mjtTextureRole.mjTEXROLE_NORMAL)])
 
 
-def _extract_texture_image(mj_model: mujoco.MjModel, texid: int) -> Image.Image | None:
-  """Extract a 2D texture as a PIL Image, or None for unsupported types."""
+def _has_alpha(image: Image.Image) -> bool:
+  """Return True if the image has an alpha channel with any transparent pixel."""
+  if image.mode != "RGBA":
+    return False
+  return bool(np.asarray(image.getchannel("A")).min() < 255)
+
+
+def _extract_texture_image(
+  mj_model: mujoco.MjModel, texid: int, flip: bool = True
+) -> Image.Image | None:
+  """Extract a 2D texture as a PIL Image, or None for unsupported types.
+
+  Color textures use MuJoCo's bottom-left origin while GLTF expects top-left,
+  so they are flipped vertically by default. Normal maps are stored without
+  that flip (they are typically authored with `vflip="false"` while color maps
+  use `vflip="true"`), so pass flip=False to keep them aligned with the albedo
+  texture and the shared UVs.
+  """
   w = mj_model.tex_width[texid]
   h = mj_model.tex_height[texid]
   nc = mj_model.tex_nchannel[texid]
   adr = mj_model.tex_adr[texid]
   data = mj_model.tex_data[adr : adr + w * h * nc]
 
-  # MuJoCo uses bottom-left origin; GLTF expects top-left.
   if nc == 1:
-    arr = np.flipud(data.reshape(h, w))
-    return Image.fromarray(arr.astype(np.uint8), mode="L")
+    arr = data.reshape(h, w)
   elif nc in (3, 4):
-    arr = np.flipud(data.reshape(h, w, nc))
-    return Image.fromarray(arr.astype(np.uint8))
-  return None
+    arr = data.reshape(h, w, nc)
+  else:
+    return None
+
+  if flip:
+    arr = np.flipud(arr)
+  mode = "L" if nc == 1 else None
+  return Image.fromarray(arr.astype(np.uint8), mode=mode)
 
 
 def _resolve_flat_rgba(mj_model: mujoco.MjModel, geom_idx: int) -> np.ndarray:
@@ -203,15 +222,14 @@ def mujoco_mesh_to_trimesh(mj_model: mujoco.MjModel, geom_idx: int) -> trimesh.T
     if texid_albedo >= 0:
       image_albedo = _extract_texture_image(mj_model, texid_albedo)
     if texid_normalmap >= 0:
-      if image_normalmap_flipped := _extract_texture_image(mj_model, texid_normalmap):
-        image_normalmap = image_normalmap_flipped.transpose(
-          Image.Transpose.FLIP_TOP_BOTTOM
-        )
+      image_normalmap = _extract_texture_image(mj_model, texid_normalmap, flip=False)
 
     if image_albedo is not None:
       rgba = mj_model.mat_rgba[matid]
       geom_rgba = mj_model.geom_rgba[geom_idx]
-      use_blending = rgba[-1] < 0.99 or geom_rgba[-1] < 0.99
+      # Blend when the geom/material is translucent or the texture itself has
+      # transparent pixels (e.g. cut-out decals stored in the alpha channel).
+      use_blending = rgba[-1] < 0.99 or geom_rgba[-1] < 0.99 or _has_alpha(image_albedo)
       material = trimesh.visual.material.PBRMaterial(
         baseColorFactor=rgba,
         baseColorTexture=image_albedo,

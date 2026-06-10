@@ -83,9 +83,39 @@ _CUBEMAP_XML = """
 """
 
 
+_TEXTURED_XML = """
+<mujoco>
+  <asset>
+    <texture name="albedo" type="2d" builtin="checker" width="64" height="64"
+             rgb1="0.8 0.2 0.2" rgb2="0.2 0.2 0.8"/>
+    <texture name="nrm" type="2d" builtin="flat" width="64" height="64"
+             rgb1="0.5 0.5 1" rgb2="0.5 0.5 1"/>
+    <material name="mat_normal">
+      <layer texture="albedo" role="rgb"/>
+      <layer texture="nrm" role="normal"/>
+    </material>
+    <material name="mat_plain" texture="albedo"/>
+    <mesh name="quad" vertex="0 0 0  1 0 0  1 1 0  0 1 0.02"
+          texcoord="0 0  1 0  1 1  0 1" face="0 1 2  0 2 3"/>
+  </asset>
+  <worldbody>
+    <geom name="g_normal" type="mesh" mesh="quad" material="mat_normal"/>
+    <geom name="g_plain" type="mesh" mesh="quad" material="mat_plain"/>
+    <geom name="g_blend" type="mesh" mesh="quad" material="mat_plain"
+          rgba="1 1 1 0.5"/>
+  </worldbody>
+</mujoco>
+"""
+
+
 @pytest.fixture
 def hfield_model():
   return mujoco.MjModel.from_xml_string(_HFIELD_XML)
+
+
+@pytest.fixture
+def textured_model():
+  return mujoco.MjModel.from_xml_string(_TEXTURED_XML)
 
 
 @pytest.fixture

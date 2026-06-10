@@ -2,13 +2,19 @@ import mujoco
 import numpy as np
 import pytest
 import trimesh
+import trimesh.visual
+import trimesh.visual.material
 from mujoco import mjtGeom
+from PIL import Image
 
 from mjviser.conversions import (
   _create_heightfield_mesh,
   _create_shape_mesh,
   _cubemap_vertex_colors,
   _extract_mesh_data,
+  _extract_texture_image,
+  _get_texture_id,
+  _has_alpha,
   _merge_meshes,
   _resolve_flat_rgba,
   create_primitive_mesh,
@@ -118,6 +124,54 @@ def test_cubemap_mesh_to_trimesh(cubemap_model):
   mesh = mujoco_mesh_to_trimesh(cubemap_model, 0)
   assert isinstance(mesh, trimesh.Trimesh)
   assert len(mesh.vertices) > 0
+
+
+# 2D textures: normal maps and blending
+
+
+def _pbr_material(mesh):
+  assert isinstance(mesh.visual, trimesh.visual.TextureVisuals)
+  mat = mesh.visual.material
+  assert isinstance(mat, trimesh.visual.material.PBRMaterial)
+  return mat
+
+
+def test_textured_mesh_has_pbr_material(textured_model):
+  assert _pbr_material(mujoco_mesh_to_trimesh(textured_model, 0)) is not None
+
+
+def test_normalmap_applied_when_present(textured_model):
+  # Geom 0 uses a material with a normal layer.
+  assert _pbr_material(mujoco_mesh_to_trimesh(textured_model, 0)).normalTexture
+
+
+def test_no_stray_normalmap_when_absent(textured_model):
+  # Geom 1 has an albedo texture but no normal layer; the normalmap texid is
+  # -1 and must not wrap around to another texture.
+  assert _pbr_material(mujoco_mesh_to_trimesh(textured_model, 1)).normalTexture is None
+
+
+def test_opaque_material_is_not_blended(textured_model):
+  assert _pbr_material(mujoco_mesh_to_trimesh(textured_model, 1)).alphaMode == "OPAQUE"
+
+
+def test_translucent_geom_enables_blending(textured_model):
+  # Geom 2 has rgba alpha 0.5.
+  assert _pbr_material(mujoco_mesh_to_trimesh(textured_model, 2)).alphaMode == "BLEND"
+
+
+def test_has_alpha():
+  assert not _has_alpha(Image.new("RGB", (4, 4), (255, 0, 0)))
+  assert not _has_alpha(Image.new("RGBA", (4, 4), (255, 0, 0, 255)))
+  assert _has_alpha(Image.new("RGBA", (4, 4), (255, 0, 0, 128)))
+
+
+def test_extract_texture_flip(textured_model):
+  # Same texture extracted with and without the vertical flip differ.
+  texid = _get_texture_id(textured_model, textured_model.geom_matid[0])
+  flipped = np.asarray(_extract_texture_image(textured_model, texid, flip=True))
+  unflipped = np.asarray(_extract_texture_image(textured_model, texid, flip=False))
+  assert np.array_equal(unflipped, np.flipud(flipped))
 
 
 # Mesh merging
