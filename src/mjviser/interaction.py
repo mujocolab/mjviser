@@ -439,6 +439,7 @@ class PerturbationHandler:
         and self._rotate_aabb_center is not None
         and self._rotate_aabb_half is not None
         and self._body_xpos is not None
+        and self._body_xmat is not None
         and bid < self._body_xpos.shape[0]
       ):
         # Target world orientation = screen rotation applied to the body's
@@ -447,11 +448,13 @@ class PerturbationHandler:
         mujoco.mju_mulQuat(quat, self._rotate_delta_quat, self._rotate_world_quat)
         rot = np.empty(9)
         mujoco.mju_quat2Mat(rot, quat)
-        center = (
-          self._body_xpos[bid]
-          + rot.reshape(3, 3) @ self._rotate_aabb_center
-          + self._scene_offset
-        )
+        rot = rot.reshape(3, 3)
+        # Pivot the ghost about the body's center of mass -- the actual
+        # rotation pivot -- not the frame origin, so it stays anchored to the
+        # body instead of orbiting away as the target orientation sweeps.
+        ipos = np.asarray(self._model.body_ipos[bid], dtype=float)
+        com = self._body_xpos[bid] + self._body_xmat[bid] @ ipos
+        center = com + rot @ (self._rotate_aabb_center - ipos) + self._scene_offset
         half = self._rotate_aabb_half.copy()
     if center is None or half is None or quat is None:
       self._hide_ghost()
