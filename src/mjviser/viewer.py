@@ -87,12 +87,6 @@ class Viewer:
     self._dirty = True
     self._step_count = 0
 
-    # Snapshot of ``qfrc_applied`` taken just before the perturbation
-    # adds its force, so we can undo our addition before the next step
-    # without clobbering user-supplied generalized forces. ``None``
-    # means no perturbation force is currently in flight.
-    self._pert_saved_qfrc: np.ndarray | None = None
-
     # Timing.
     self._budget = 0.0
     self._last_tick = 0.0
@@ -190,6 +184,11 @@ class Viewer:
       with self._lock:
         if self._step_physics(dt):
           self._dirty = True
+    else:
+      # Paused: a drag repositions free-joint / mocap bodies kinematically.
+      with self._lock:
+        if self.scene.perturbation.apply(self.model, self.data, paused=True):
+          self._dirty = True
 
     # Render at fixed frame rate, but only when state changed.
     self._time_until_next_render -= dt
@@ -206,34 +205,6 @@ class Viewer:
     self._stats_frames += 1
     self._update_stats()
 
-  def _apply_perturbation(self) -> None:
-    """Apply any pending interactive perturbation force.
-
-    ``mj_applyFT`` *adds* to ``qfrc_applied`` rather than overwriting
-    it, so a force applied last substep would compound this substep
-    if we just called it again. We undo the previous addition by
-    restoring a pre-perturbation snapshot, then re-snapshot and re-add
-    on top -- which preserves any user-supplied ``qfrc_applied``
-    (a documented MuJoCo extension point) instead of zeroing it out.
-    """
-    if self._pert_saved_qfrc is not None:
-      self.data.qfrc_applied[:] = self._pert_saved_qfrc
-      self._pert_saved_qfrc = None
-
-    pert = self.scene.perturbation.get_perturbation()
-    if pert is None:
-      return
-    self._pert_saved_qfrc = self.data.qfrc_applied.copy()
-    mujoco.mj_applyFT(
-      self.model,
-      self.data,
-      pert.force,
-      pert.torque,
-      pert.point,
-      pert.body_id,
-      self.data.qfrc_applied,
-    )
-
   def _step_physics(self, dt: float) -> bool:
     """Run physics steps for this frame's sim-time budget.
 
@@ -249,7 +220,7 @@ class Viewer:
     deadline = time.perf_counter() + _FRAME_TIME
     hit_deadline = False
     while self._budget >= step_dt:
-      self._apply_perturbation()
+      self.scene.perturbation.apply(self.model, self.data, paused=False)
       self._step_fn(self.model, self.data)
       self._budget -= step_dt
       self._step_count += 1
@@ -319,11 +290,9 @@ class Viewer:
       self._reset()
       self._step_count = 0
       self._budget = 0.0
-      # Drop any in-flight drag and the saved-qfrc snapshot: the
-      # snapshot was taken against the pre-reset state and would
-      # otherwise be restored on top of the freshly-reset data.
+      # Drop any in-flight drag so a stale body id can't outlive the
+      # reset. mj_resetData already zeroed xfrc_applied.
       self.scene.perturbation.clear()
-      self._pert_saved_qfrc = None
       self._render()
       self._update_status_display()
     self._sync_sliders()

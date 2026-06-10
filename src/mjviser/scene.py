@@ -151,7 +151,7 @@ class ViserMujocoScene:
 
     # Visualization settings.
     self.env_idx = 0
-    self.camera_tracking_enabled = True
+    self.camera_tracking_enabled = False
     self.show_only_selected = False
     self.geom_groups_visible = [True, True, True, False, False, False]
     self.site_groups_visible = [True, True, True, False, False, False]
@@ -186,6 +186,8 @@ class ViserMujocoScene:
     self.paused = False
     self._vis_flag_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
     self._simple_flag_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
+    self._geom_group_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
+    self._site_group_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
     self.perturbation = PerturbationHandler(server, mj_model, self.mj_data)
 
     # Cached visualization state for re-rendering when settings change.
@@ -461,6 +463,15 @@ class ViserMujocoScene:
             for client in self.server.get_clients().values():
               client.camera.position = _camera_offset
               client.camera.look_at = np.zeros(3)
+          else:
+            # Untrack without teleporting: the scene offset is about to drop
+            # to zero (bodies snap back to world coords), so shift the camera
+            # by the same amount to keep the view exactly where it is now.
+            # viser's position setter translates look_at along with the camera,
+            # so setting position alone preserves the orientation.
+            delta = -self._scene_offset
+            for client in self.server.get_clients().values():
+              client.camera.position = np.asarray(client.camera.position) + delta
 
         self._apply_visualization_change(_mutate)
 
@@ -762,6 +773,7 @@ class ViserMujocoScene:
           initial_value=self.geom_groups_visible[i],
           hint=f"Show/hide geometry in group {i}",
         )
+        self._geom_group_checkboxes[i] = cb
 
         @cb.on_update
         def _(event, group_idx=i) -> None:
@@ -778,6 +790,7 @@ class ViserMujocoScene:
           initial_value=self.site_groups_visible[i],
           hint=f"Show/hide sites in group {i}",
         )
+        self._site_group_checkboxes[i] = cb
 
         @cb.on_update
         def _(event, group_idx=i) -> None:
@@ -891,8 +904,36 @@ class ViserMujocoScene:
       cmd = server.gui.add_command(label, hotkey=key)  # type: ignore[arg-type]
       cmd.on_trigger(lambda _, _idx=flag_idx: self._toggle_vis_flag(_idx))
 
+    # Number keys toggle geom groups; shift+number toggles site groups
+    # (mirrors MuJoCo simulate).
+    for i in range(6):
+      digit = str(i)
+      geom_cmd = server.gui.add_command(
+        f"Toggle Geom Group {i}",
+        hotkey=digit,  # type: ignore[arg-type]
+      )
+      geom_cmd.on_trigger(
+        lambda _, _idx=i: self._toggle_group(self._geom_group_checkboxes, _idx)
+      )
+      site_cmd = server.gui.add_command(
+        f"Toggle Site Group {i}",
+        hotkey=digit,  # type: ignore[arg-type]
+        modifier="shift",
+      )
+      site_cmd.on_trigger(
+        lambda _, _idx=i: self._toggle_group(self._site_group_checkboxes, _idx)
+      )
+
     cmd = server.gui.add_command("Free Camera", hotkey="escape")
     cmd.on_trigger(lambda _: self._set_free_camera())
+
+  def _toggle_group(
+    self, checkboxes: dict[int, viser.GuiCheckboxHandle], group_idx: int
+  ) -> None:
+    """Flip a geom/site group checkbox; its on_update applies the change."""
+    cb = checkboxes.get(group_idx)
+    if cb is not None:
+      cb.value = not cb.value
 
   def _set_free_camera(self) -> None:
     """Switch to free camera mode."""
