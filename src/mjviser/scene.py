@@ -370,6 +370,7 @@ class ViserMujocoScene:
     camera_distance: float = -1.0,
     camera_azimuth: float = 120.0,
     camera_elevation: float = 20.0,
+    dark_mode: bool = True,
   ) -> None:
     """Add camera and environment controls into the current GUI context.
 
@@ -378,7 +379,18 @@ class ViserMujocoScene:
             from model extent.
         camera_azimuth: Default camera azimuth angle in degrees.
         camera_elevation: Default camera elevation angle in degrees.
+        dark_mode: Initial dark mode state.
     """
+    self.server.gui.configure_theme(dark_mode=dark_mode)
+
+    dark_mode_cb = self.server.gui.add_checkbox(
+      "Dark mode", initial_value=dark_mode
+    )
+
+    @dark_mode_cb.on_update
+    def _(_) -> None:
+      self.server.gui.configure_theme(dark_mode=dark_mode_cb.value)
+
     if self.num_envs > 1:
       with self.server.gui.add_folder("Environment"):
         env_slider = self.server.gui.add_slider(
