@@ -44,8 +44,15 @@ def _is_cubemap_texture(mj_model: mujoco.MjModel, texid: int) -> bool:
   return h == w * 6 and nc in (1, 3, 4)
 
 
-# Cube map face order with the outward scene axis each face sits on:
-# +X (right), -X (left), +Y (up), -Y (down), +Z (front), -Z (back).
+def _is_2d_texture_supported(mj_model: mujoco.MjModel, texid: int) -> bool:
+  """Return True if texid is a 2D texture with a channel count we can extract."""
+  return int(mj_model.tex_nchannel[texid]) in (1, 3, 4)
+
+
+# MuJoCo stores cube faces in the order right, left, up, down, front, back and
+# uploads them to GL_TEXTURE_CUBE_MAP_POSITIVE_X + i. For a geom (regular) cube
+# texture MuJoCo samples with texcoords = the geom-local position (x, y, z), so
+# in the geom frame the faces sit on +X, -X, +Y, -Y, +Z, -Z respectively.
 _CUBEMAP_AXES: np.ndarray = np.array(
   [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]],
   dtype=np.float64,
@@ -292,11 +299,11 @@ def create_primitive_mesh(mj_model: mujoco.MjModel, geom_id: int) -> trimesh.Tri
   if geom_type == mjtGeom.mjGEOM_HFIELD:
     return _create_heightfield_mesh(mj_model, geom_id)
 
-  # Box primitives with a cube map texture get per-face textured rendering.
-  if geom_type == mjtGeom.mjGEOM_BOX:
-    textured = _create_cubemap_box_mesh(mj_model, geom_id)
-    if textured is not None:
-      return textured
+  # Textured primitives (box/sphere/ellipsoid cube maps, plane 2D textures) are
+  # dispatched in one place so this and get_geom_texture_id stay in sync.
+  textured = _textured_primitive_mesh(mj_model, geom_id)
+  if textured is not None:
+    return textured
 
   if geom_type == mjtGeom.mjGEOM_PLANE:
     size = mj_model.geom_size[geom_id]
@@ -310,17 +317,46 @@ def create_primitive_mesh(mj_model: mujoco.MjModel, geom_id: int) -> trimesh.Tri
   return mesh
 
 
-# Per cube face, the (image-right, image-up) directions in scene coordinates as
-# seen by a viewer looking at the face from outside the cube. Indexed by the
-# face order in _CUBEMAP_AXES. Matches MuJoCo's cube map convention.
-_CUBEMAP_FACE_BASIS: tuple[tuple[np.ndarray, np.ndarray], ...] = (
-  (np.array([0.0, -1.0, 0.0]), np.array([0.0, 0.0, 1.0])),  # +X
-  (np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0])),  # -X
-  (np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, -1.0])),  # +Y
-  (np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0])),  # -Y
-  (np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])),  # +Z
-  (np.array([-1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])),  # -Z
+# OpenGL cube-map per-face selectors, indexed by face order
+# (right, left, up, down, front, back). For a point/direction p on face fi:
+#   sc = sc_sign * p[sc_axis];  tc = tc_sign * p[tc_axis];  ma = |p[major]|
+#   s = (sc/ma + 1)/2;  t = (tc/ma + 1)/2   (t = 0 is the top row of the face)
+# This is the convention MuJoCo's renderer uses for a geom cube texture; the box
+# and sphere both route through it so they stay consistent.
+_CUBE_FACE_ST: tuple[tuple[int, int, int, int, int], ...] = (
+  (2, -1, 1, -1, 0),  # +X right:  sc=-z, tc=-y
+  (2, 1, 1, -1, 0),  # -X left:   sc=+z, tc=-y
+  (0, 1, 2, 1, 1),  # +Y up:     sc=+x, tc=+z
+  (0, 1, 2, -1, 1),  # -Y down:   sc=+x, tc=-z
+  (0, 1, 1, -1, 2),  # +Z front:  sc=+x, tc=-y
+  (0, -1, 1, -1, 2),  # -Z back:   sc=-x, tc=-y
 )
+
+
+def _cube_face_st(
+  positions: np.ndarray, faces: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+  """Return per-point (s, t) in [0,1] for points lying on the given cube faces."""
+  table = np.array(_CUBE_FACE_ST)
+  sc_axis, sc_sign, tc_axis, tc_sign, major = (table[faces, k] for k in range(5))
+  idx = np.arange(len(faces))
+  sc = sc_sign * positions[idx, sc_axis]
+  tc = tc_sign * positions[idx, tc_axis]
+  ma = np.maximum(np.abs(positions[idx, major]), 1e-12)
+  return (sc / ma + 1.0) * 0.5, (tc / ma + 1.0) * 0.5
+
+
+def _gl_cube_face(directions: np.ndarray) -> np.ndarray:
+  """Return the cube face index (right, left, up, down, front, back) per direction."""
+  x, y, z = directions[:, 0], directions[:, 1], directions[:, 2]
+  ax, ay, az = np.abs(x), np.abs(y), np.abs(z)
+  x_major = (ax >= ay) & (ax >= az)
+  y_major = (ay > ax) & (ay >= az)
+  return np.where(
+    x_major,
+    np.where(x >= 0, 0, 1),
+    np.where(y_major, np.where(y >= 0, 2, 3), np.where(z >= 0, 4, 5)),
+  ).astype(np.int64)
 
 
 def _extract_cubemap_atlas(mj_model: mujoco.MjModel, texid: int) -> Image.Image | None:
@@ -341,9 +377,10 @@ def _extract_cubemap_atlas(mj_model: mujoco.MjModel, texid: int) -> Image.Image 
 
   atlas = Image.new(mode, (w, 6 * w))
   for i in range(6):
-    # MuJoCo stores rows bottom-up; flip to PIL top-down so the face
-    # image appears right-side-up in the atlas.
-    arr = np.flipud(data[i]).astype(np.uint8)
+    # Face rows are stored top-down (PNG order); face i goes to atlas rows
+    # [i*w, (i+1)*w). The box UVs sample this with the same (s, t) the sphere
+    # sampler uses, so both share the OpenGL cube-map orientation.
+    arr = data[i].astype(np.uint8)
     if nc == 1:
       arr = arr.reshape(w, w)
     atlas.paste(Image.fromarray(arr, mode=mode), (0, i * w))
@@ -370,36 +407,32 @@ def _create_cubemap_box_mesh(
   if atlas is None:
     return None
 
-  sx, sy, sz = mj_model.geom_size[geom_id]
-  centers = _CUBEMAP_AXES * np.array([sx, sx, sy, sy, sz, sz])[:, None]
-  half_extents = [(sy, sz), (sy, sz), (sx, sz), (sx, sz), (sx, sy), (sx, sy)]
+  size = mj_model.geom_size[geom_id]
+  combos = ((-1, -1), (1, -1), (1, 1), (-1, 1))
 
   verts = np.zeros((24, 3), dtype=np.float64)
   uvs = np.zeros((24, 2), dtype=np.float64)
   faces = np.zeros((12, 3), dtype=np.int64)
-  for fi in range(6):
-    c = centers[fi]
-    r, u = _CUBEMAP_FACE_BASIS[fi]
-    hr, hu = half_extents[fi]
-    # Corners in image-relative order: bottom-left, bottom-right, top-right,
-    # top-left.
+  for fi, (_sc_axis, _sc_sign, _tc_axis, _tc_sign, major) in enumerate(_CUBE_FACE_ST):
+    n = _CUBEMAP_AXES[fi]
+    free = [k for k in range(3) if k != major]
     base = fi * 4
-    verts[base + 0] = c - hr * r - hu * u
-    verts[base + 1] = c + hr * r - hu * u
-    verts[base + 2] = c + hr * r + hu * u
-    verts[base + 3] = c - hr * r + hu * u
-    # Atlas UVs (OpenGL convention: v=0 at bottom of atlas image).
-    v_top = 1.0 - fi / 6.0
-    v_bot = 1.0 - (fi + 1) / 6.0
-    uvs[base + 0] = (0.0, v_bot)
-    uvs[base + 1] = (1.0, v_bot)
-    uvs[base + 2] = (1.0, v_top)
-    uvs[base + 3] = (0.0, v_top)
-    # Pick triangle winding so the face normal points outward. The image
-    # basis (r, u) is chosen so the texture reads correctly when viewed
-    # from outside, which means r × u may point either way relative to
-    # the outward axis depending on the face.
-    if np.dot(np.cross(r, u), _CUBEMAP_AXES[fi]) >= 0:
+    corners = np.zeros((4, 3))
+    for ci, (a, b) in enumerate(combos):
+      corners[ci, major] = n[major] * size[major]
+      corners[ci, free[0]] = a * size[free[0]]
+      corners[ci, free[1]] = b * size[free[1]]
+    verts[base : base + 4] = corners
+
+    # Atlas UVs from the shared GL (s, t): face fi spans atlas rows
+    # [fi*w, (fi+1)*w), so v = 1 - (fi + t) / 6 (glTF v-up over the strip).
+    s, t = _cube_face_st(corners, np.full(4, fi))
+    uvs[base : base + 4, 0] = s
+    uvs[base : base + 4, 1] = 1.0 - (fi + t) / 6.0
+
+    # Wind triangles so the face normal points outward.
+    normal = np.cross(corners[1] - corners[0], corners[2] - corners[0])
+    if np.dot(normal, n) >= 0:
       faces[fi * 2 + 0] = (base + 0, base + 1, base + 2)
       faces[fi * 2 + 1] = (base + 0, base + 2, base + 3)
     else:
@@ -416,6 +449,208 @@ def _create_cubemap_box_mesh(
   )
   mesh.visual = trimesh.visual.TextureVisuals(uv=uvs, material=material)
   return mesh
+
+
+def _cubemap_sample_colors(
+  mj_model: mujoco.MjModel, texid: int, directions: np.ndarray
+) -> np.ndarray | None:
+  """Sample a cube map along directions, returning uint8 RGBA.
+
+  Implements the OpenGL cube-map lookup MuJoCo uses for a geom (regular)
+  cube texture: texcoords are the geom-local direction (x, y, z), faces
+  are stored right, left, up, down, front, back, and the per-face (s, t)
+  follow the GL spec. Face rows are stored top-down (PNG order), so t=0
+  reads the top of the face image.
+  """
+  if not _is_cubemap_texture(mj_model, texid):
+    return None
+  w = int(mj_model.tex_width[texid])
+  nc = int(mj_model.tex_nchannel[texid])
+  adr = int(mj_model.tex_adr[texid])
+  data = mj_model.tex_data[adr : adr + 6 * w * w * nc].reshape(6, w, w, nc)
+
+  face = _gl_cube_face(directions)
+  s, t = _cube_face_st(directions, face)
+  col = np.clip((s * w).astype(int), 0, w - 1)
+  row = np.clip((t * w).astype(int), 0, w - 1)
+  px = data[face, row, col]
+
+  out = np.full((len(directions), 4), 255, dtype=np.uint8)
+  if nc == 1:
+    out[:, :3] = px[:, :1]
+  else:
+    out[:, :nc] = px[:, :nc]
+  return out
+
+
+def _cubemap_to_equirect(
+  mj_model: mujoco.MjModel,
+  texid: int,
+  scale: np.ndarray,
+  width: int = 512,
+  height: int = 256,
+) -> Image.Image | None:
+  """Bake a cube map into an equirectangular (lat-long) RGBA image.
+
+  Row 0 is the north pole (+Z); columns sweep longitude 0..2*pi with 0 along
+  +X. Sampling reuses _cubemap_sample_colors so the face layout matches the box
+  renderer. The per-axis ``scale`` matches the geom's size: MuJoCo samples a
+  geom cube texture by the geom-local position, so an ellipsoid's faces land at
+  different angles than a sphere's.
+  """
+  lon = (np.arange(width) + 0.5) / width * (2.0 * np.pi)
+  lat = (np.arange(height) + 0.5) / height * np.pi
+  lon_g, lat_g = np.meshgrid(lon, lat)
+  sin_lat = np.sin(lat_g)
+  directions = np.stack(
+    [sin_lat * np.cos(lon_g), sin_lat * np.sin(lon_g), np.cos(lat_g)], axis=-1
+  ).reshape(-1, 3)
+  colors = _cubemap_sample_colors(mj_model, texid, directions * scale)
+  if colors is None:
+    return None
+  return Image.fromarray(colors.reshape(height, width, 4), "RGBA")
+
+
+def _create_textured_sphere_mesh(
+  mj_model: mujoco.MjModel, geom_id: int
+) -> trimesh.Trimesh | None:
+  """Build a UV-textured sphere or ellipsoid mesh from a cube map.
+
+  Returns None when the geom has no material or no cube map texture. The
+  cube map is baked into an equirectangular image and applied to a
+  lat-long sphere with a duplicated seam column, so the texture stays
+  crisp regardless of mesh density.
+  """
+  matid = int(mj_model.geom_matid[geom_id])
+  if matid < 0 or matid >= mj_model.nmat:
+    return None
+  texid = _get_texture_id(mj_model, matid)
+  if texid < 0 or not _is_cubemap_texture(mj_model, texid):
+    return None
+  size = mj_model.geom_size[geom_id]
+  # Per-axis scale: sphere is uniform (radius), ellipsoid uses its three radii.
+  is_ellipsoid = int(mj_model.geom_type[geom_id]) == mjtGeom.mjGEOM_ELLIPSOID
+  scale = np.asarray(size, dtype=np.float64) if is_ellipsoid else np.full(3, size[0])
+  image = _cubemap_to_equirect(mj_model, texid, scale)
+  if image is None:
+    return None
+
+  n_lat, n_lon = 24, 48
+  lat = np.linspace(0.0, np.pi, n_lat + 1)
+  lon = np.linspace(0.0, 2.0 * np.pi, n_lon + 1)
+  lat_g, lon_g = np.meshgrid(lat, lon, indexing="ij")
+  sin_lat = np.sin(lat_g)
+  verts = np.stack(
+    [sin_lat * np.cos(lon_g), sin_lat * np.sin(lon_g), np.cos(lat_g)], axis=-1
+  ).reshape(-1, 3)
+  # north pole (lat 0) -> top row of the image -> v=1 in glTF's v-up frame.
+  uv = np.stack([lon_g / (2.0 * np.pi), 1.0 - lat_g / np.pi], axis=-1).reshape(-1, 2)
+
+  ncols = n_lon + 1
+  i, j = np.meshgrid(np.arange(n_lat), np.arange(n_lon), indexing="ij")
+  a = (i * ncols + j).ravel()
+  b, c, d = a + 1, a + ncols + 1, a + ncols
+  # Wind triangles so their normals point outward (radius increases away
+  # from the sphere center), otherwise the sphere renders inside-out.
+  faces = np.concatenate(
+    [np.stack([a, c, b], axis=1), np.stack([a, d, c], axis=1)], axis=0
+  )
+
+  mesh = trimesh.Trimesh(vertices=verts * scale, faces=faces, process=False)
+  material = trimesh.visual.material.PBRMaterial(
+    baseColorTexture=image,
+    metallicFactor=0.0,
+    roughnessFactor=1.0,
+  )
+  mesh.visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
+  return mesh
+
+
+def _create_textured_plane_mesh(
+  mj_model: mujoco.MjModel, geom_id: int
+) -> trimesh.Trimesh | None:
+  """Build a textured quad for a plane geom with a 2D material texture.
+
+  Returns None when the plane has no material, no 2D texture, or the
+  texture is a cube map / unsupported format. UVs follow MuJoCo's
+  texrepeat/texuniform semantics so the image tiles across the plane.
+  The quad is double-sided so the plane stays visible from below.
+  """
+  matid = int(mj_model.geom_matid[geom_id])
+  if matid < 0 or matid >= mj_model.nmat:
+    return None
+  texid = _get_texture_id(mj_model, matid)
+  if texid < 0 or _is_cubemap_texture(mj_model, texid):
+    return None
+  image = _extract_texture_image(mj_model, texid)
+  if image is None:
+    return None
+
+  size = mj_model.geom_size[geom_id]
+  half_x = float(size[0]) if size[0] > 0 else 10.0
+  half_y = float(size[1]) if size[1] > 0 else 10.0
+
+  # texrepeat counts repetitions over the whole plane when texuniform is
+  # false, or repetitions per unit length when true.
+  rep = np.asarray(mj_model.mat_texrepeat[matid], dtype=np.float64)
+  if mj_model.mat_texuniform[matid]:
+    rep = rep * np.array([2.0 * half_x, 2.0 * half_y])
+
+  corners = np.array(
+    [
+      [-half_x, -half_y, 0.0],
+      [half_x, -half_y, 0.0],
+      [half_x, half_y, 0.0],
+      [-half_x, half_y, 0.0],
+    ]
+  )
+  corner_uvs = np.array([[0.0, 0.0], [rep[0], 0.0], [rep[0], rep[1]], [0.0, rep[1]]])
+  # Duplicate the corners so the reversed faces get an outward -Z normal.
+  verts = np.vstack([corners, corners])
+  uv = np.vstack([corner_uvs, corner_uvs])
+  faces = np.array([[0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6]], dtype=np.int64)
+
+  mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+  rgba = mj_model.mat_rgba[matid]
+  geom_rgba = mj_model.geom_rgba[geom_id]
+  # Blend when the material or geom is translucent, or the texture has alpha.
+  # Mirror the mesh texture path, which checks both rgba sources.
+  use_blending = rgba[-1] < 0.99 or geom_rgba[-1] < 0.99 or _has_alpha(image)
+  material = trimesh.visual.material.PBRMaterial(
+    baseColorFactor=rgba,
+    baseColorTexture=image,
+    metallicFactor=0.0,
+    roughnessFactor=1.0,
+    alphaMode="BLEND" if use_blending else "OPAQUE",
+  )
+  mesh.visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
+  return mesh
+
+
+# Primitive geom types that take a cube map; planes take 2D textures. Used by
+# both _textured_primitive_mesh and get_geom_texture_id so they stay in sync.
+_CUBEMAP_PRIMITIVE_TYPES = (
+  mjtGeom.mjGEOM_BOX,
+  mjtGeom.mjGEOM_SPHERE,
+  mjtGeom.mjGEOM_ELLIPSOID,
+)
+
+
+def _textured_primitive_mesh(
+  mj_model: mujoco.MjModel, geom_id: int
+) -> trimesh.Trimesh | None:
+  """Build a textured mesh for a primitive geom, or None if not textured.
+
+  Box/sphere/ellipsoid use the geom's cube map; planes use a 2D texture.
+  """
+  geom_type = int(mj_model.geom_type[geom_id])
+  if geom_type == mjtGeom.mjGEOM_BOX:
+    return _create_cubemap_box_mesh(mj_model, geom_id)
+  if geom_type in (mjtGeom.mjGEOM_SPHERE, mjtGeom.mjGEOM_ELLIPSOID):
+    return _create_textured_sphere_mesh(mj_model, geom_id)
+  if geom_type == mjtGeom.mjGEOM_PLANE:
+    return _create_textured_plane_mesh(mj_model, geom_id)
+  return None
 
 
 def _create_heightfield_mesh(mj_model: mujoco.MjModel, geom_id: int) -> trimesh.Trimesh:
@@ -500,9 +735,15 @@ def get_geom_texture_id(mj_model: mujoco.MjModel, geom_idx: int) -> int:
   if geom_type == mjtGeom.mjGEOM_HFIELD:
     return texid
 
-  # Box primitives use the cube map texture via per-face UV mapping.
-  if geom_type == mjtGeom.mjGEOM_BOX:
+  # Box/sphere/ellipsoid take a cube map (see _textured_primitive_mesh).
+  if geom_type in _CUBEMAP_PRIMITIVE_TYPES:
     return texid if _is_cubemap_texture(mj_model, texid) else -1
+
+  # Planes take a 2D (non-cube-map) texture we can actually extract.
+  if geom_type == mjtGeom.mjGEOM_PLANE:
+    if _is_cubemap_texture(mj_model, texid):
+      return -1
+    return texid if _is_2d_texture_supported(mj_model, texid) else -1
 
   if geom_type != mjtGeom.mjGEOM_MESH:
     return -1
@@ -519,13 +760,19 @@ def group_geoms_by_visual_compat(
 ) -> list[list[int]]:
   """Partition geom IDs into groups that can be safely merged.
 
-  Geoms sharing the same texture ID are grouped together. All
-  untextured geoms form a single group.
+  Geoms sharing the same texture ID are grouped together. Untextured
+  opaque geoms form one group; untextured translucent geoms are split by
+  color so each can be rendered with its own alpha-blended material.
   """
-  groups: dict[int, list[int]] = {}
+  groups: dict[object, list[int]] = {}
   for gid in geom_ids:
     tex_id = get_geom_texture_id(mj_model, gid)
-    groups.setdefault(tex_id, []).append(gid)
+    if tex_id >= 0:
+      key: object = ("tex", tex_id)
+    else:
+      rgba = _resolve_flat_rgba(mj_model, gid)
+      key = ("opaque",) if rgba[3] >= 255 else ("alpha", tuple(int(c) for c in rgba))
+    groups.setdefault(key, []).append(gid)
   return list(groups.values())
 
 
@@ -578,6 +825,41 @@ def _merge_meshes(
   return result
 
 
+def _apply_translucent_blend(mesh: trimesh.Trimesh) -> None:
+  """Give a uniform-colored translucent mesh an alpha-blended material.
+
+  trimesh exports per-vertex alpha as an opaque material, so a flat
+  translucent color (e.g. goal nets at rgba alpha 0.3) renders solid.
+  When every vertex shares one color with alpha < 1, swap to a PBR
+  material with alphaMode=BLEND so the viewer renders it see-through.
+
+  This only handles a single translucent color because trimesh can't carry
+  per-vertex alpha plus a BLEND material. That is sufficient because
+  group_geoms_by_visual_compat splits untextured translucent geoms by exact
+  rgba, so every translucent merge reaching here is single-color
+  (test_translucent_geoms_split_by_color guards that invariant).
+  """
+  vis = mesh.visual
+  if not isinstance(vis, trimesh.visual.ColorVisuals):
+    return
+  vc = vis.vertex_colors
+  if vc is None or len(vc) == 0:
+    return
+  unique = np.unique(vc, axis=0)
+  if len(unique) != 1 or unique[0, 3] >= 255:
+    return
+  mesh.visual = trimesh.visual.TextureVisuals(
+    uv=np.zeros((len(mesh.vertices), 2)),
+    material=trimesh.visual.material.PBRMaterial(
+      baseColorFactor=(unique[0] / 255.0).tolist(),
+      metallicFactor=0.0,
+      roughnessFactor=1.0,
+      alphaMode="BLEND",
+      doubleSided=True,
+    ),
+  )
+
+
 def merge_geoms(mj_model: mujoco.MjModel, geom_ids: list[int]) -> trimesh.Trimesh:
   """Merge multiple geoms into a single trimesh in local body space."""
   meshes = []
@@ -587,11 +869,13 @@ def merge_geoms(mj_model: mujoco.MjModel, geom_ids: list[int]) -> trimesh.Trimes
     else:
       meshes.append(create_primitive_mesh(mj_model, geom_id))
 
-  return _merge_meshes(
+  result = _merge_meshes(
     meshes,
     [mj_model.geom_pos[gid] for gid in geom_ids],
     [mj_model.geom_quat[gid] for gid in geom_ids],
   )
+  _apply_translucent_blend(result)
+  return result
 
 
 def _hull_trimesh_for_mesh_id(
