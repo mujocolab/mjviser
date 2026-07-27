@@ -46,6 +46,7 @@ class Viewer:
     reset_fn: Callable[[mujoco.MjModel, mujoco.MjData], None] | None = None,
     num_envs: int = 1,
     server: viser.ViserServer | None = None,
+    cleanup_hook: Callable[[], None] | None = None,
   ) -> None:
     """Create an active viewer.
 
@@ -66,6 +67,7 @@ class Viewer:
       num_envs: Number of parallel environments (passed to
         ``ViserMujocoScene``).
       server: Optional viser server. If None, one is created.
+      cleanup_hook: Optional function called on exit to clean up resources.
     """
     self.model = model
     self.data = data
@@ -76,6 +78,7 @@ class Viewer:
     self.scene = ViserMujocoScene(self._server, model, num_envs=num_envs)
     self._lock = Lock()
     self.scene.set_refresh_handler(self._refresh_scene_from_gui)
+    self._cleanup_hook = cleanup_hook if cleanup_hook is not None else lambda: None
 
     # Speed.
     self._speed_idx = _SPEEDS.index(1.0)
@@ -86,6 +89,7 @@ class Viewer:
     self._paused = False
     self._dirty = True
     self._step_count = 0
+    self._interrupted = False
 
     # Timing.
     self._budget = 0.0
@@ -146,19 +150,17 @@ class Viewer:
       mujoco.mj_resetData(self.model, self.data)
       mujoco.mj_forward(self.model, self.data)
 
+  def _on_sigint(self, signum, frame):
+      self._interrupted = True
+      signal.signal(signal.SIGINT, signal.SIG_DFL)
+
   def run(self) -> None:
     """Run the viewer loop until Ctrl+C."""
     self._setup_gui()
 
     prev_handler = signal.getsignal(signal.SIGINT)
-    interrupted = False
 
-    def _on_sigint(signum, frame):
-      nonlocal interrupted
-      interrupted = True
-      signal.signal(signal.SIGINT, signal.SIG_DFL)
-
-    signal.signal(signal.SIGINT, _on_sigint)
+    signal.signal(signal.SIGINT, self._on_sigint)
 
     if self._render_fn is None:
       mujoco.mj_forward(self.model, self.data)
@@ -168,10 +170,11 @@ class Viewer:
     self._last_tick = now
     self._stats_last_time = now
     try:
-      while not interrupted:
+      while not self._interrupted:
         self._tick()
         time.sleep(0.001)
     finally:
+      self._cleanup_hook()
       self._server.stop()
       signal.signal(signal.SIGINT, prev_handler)
 
