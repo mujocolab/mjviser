@@ -151,8 +151,8 @@ class Viewer:
       mujoco.mj_forward(self.model, self.data)
 
   def _on_sigint(self, signum, frame):
-      self._interrupted = True
-      signal.signal(signal.SIGINT, signal.SIG_DFL)
+    self._interrupted = True
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
   def run(self) -> None:
     """Run the viewer loop until Ctrl+C."""
