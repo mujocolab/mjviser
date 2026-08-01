@@ -34,7 +34,7 @@ dependencies = [
   "numpy",
   "trimesh>=4.8.3",
   "viser>=1.0.30",
-  "Pillow>=12.2.0",
+  "Pillow>=12.3.0",
 ]
 
 [project.urls]
@@ -59,7 +59,9 @@ dev = [
 
 [tool.uv]
 constraint-dependencies = [
+  "idna>=3.15",
   "lxml>=6.1.0",
+  "urllib3>=2.7.0",
 ]
 
 [tool.ruff]
