@@ -67,11 +67,11 @@ scene = ViserMujocoScene(server, model, num_envs=1)
 scene.create_visualization_gui()
 
 with server.gui.add_folder("My Controls"):
-    slider = server.gui.add_slider("Force", min=0, max=100, initial_value=0)
+  slider = server.gui.add_slider("Force", min=0, max=100, initial_value=0)
 
 while True:
-    mujoco.mj_step(model, data)
-    scene.update_from_mjdata(data)
+  mujoco.mj_step(model, data)
+  scene.update_from_mjdata(data)
 ```
 
 ## Examples
