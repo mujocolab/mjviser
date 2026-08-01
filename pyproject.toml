@@ -47,14 +47,14 @@ mjviser = "mjviser.__main__:main"
 [project.optional-dependencies]
 dev = [
   "pytest",
-  "ruff",
+  "ruff==0.15.7",
 ]
 
 [dependency-groups]
 dev = [
   "pyright>=1.1.408",
   "pytest>=9.0.3",
-  "ruff>=0.15.7",
+  "ruff==0.15.7",
 ]
 
 [tool.uv]

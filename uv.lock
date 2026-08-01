@@ -333,7 +333,7 @@ requires-dist = [
     { name = "numpy" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "pytest", marker = "extra == 'dev'" },
-    { name = "ruff", marker = "extra == 'dev'" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.7" },
     { name = "trimesh", specifier = ">=4.8.3" },
     { name = "viser", specifier = ">=1.0.30" },
 ]
@@ -343,7 +343,7 @@ provides-extras = ["dev"]
 dev = [
     { name = "pyright", specifier = ">=1.1.408" },
     { name = "pytest", specifier = ">=9.0.3" },
-    { name = "ruff", specifier = ">=0.15.7" },
+    { name = "ruff", specifier = "==0.15.7" },
 ]
 
 [[package]]

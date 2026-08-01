@@ -20,8 +20,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uvx ruff check --diff
-      - run: uvx ruff format --diff
+      - run: uvx ruff@0.15.7 check --diff
+      - run: uvx ruff@0.15.7 format --diff
 
   tests:
     runs-on: ubuntu-latest
