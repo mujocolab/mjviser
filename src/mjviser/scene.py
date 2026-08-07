@@ -1247,9 +1247,9 @@ class ViserMujocoScene:
     body_geoms: dict[int, list[int]] = {}
     for geom_id in range(self.mj_model.ngeom):
       if int(self.mj_model.geom_type[geom_id]) not in (
-                int(mjtGeom.mjGEOM_MESH),
-                int(mjtGeom.mjGEOM_SDF),
-        ):
+        int(mjtGeom.mjGEOM_MESH),
+        int(mjtGeom.mjGEOM_SDF),
+      ):
         continue
       if int(self.mj_model.geom_dataid[geom_id]) < 0:
         continue

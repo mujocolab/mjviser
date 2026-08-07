@@ -642,9 +642,9 @@ def merge_geoms_hull(
 
   for geom_id in geom_ids:
     if int(mj_model.geom_type[geom_id]) not in (
-            int(mjtGeom.mjGEOM_MESH),
-            int(mjtGeom.mjGEOM_SDF),
-        ):
+      int(mjtGeom.mjGEOM_MESH),
+      int(mjtGeom.mjGEOM_SDF),
+    ):
       continue
 
     mesh_id = int(mj_model.geom_dataid[geom_id])
