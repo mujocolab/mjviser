@@ -504,7 +504,7 @@ def get_geom_texture_id(mj_model: mujoco.MjModel, geom_idx: int) -> int:
   if geom_type == mjtGeom.mjGEOM_BOX:
     return texid if _is_cubemap_texture(mj_model, texid) else -1
 
-  if geom_type != mjtGeom.mjGEOM_MESH:
+  if geom_type not in (mjtGeom.mjGEOM_MESH, mjtGeom.mjGEOM_SDF):
     return -1
 
   mesh_id = mj_model.geom_dataid[geom_idx]
@@ -582,7 +582,7 @@ def merge_geoms(mj_model: mujoco.MjModel, geom_ids: list[int]) -> trimesh.Trimes
   """Merge multiple geoms into a single trimesh in local body space."""
   meshes = []
   for geom_id in geom_ids:
-    if mj_model.geom_type[geom_id] == mjtGeom.mjGEOM_MESH:
+    if mj_model.geom_type[geom_id] in (mjtGeom.mjGEOM_MESH, mjtGeom.mjGEOM_SDF):
       meshes.append(mujoco_mesh_to_trimesh(mj_model, geom_id))
     else:
       meshes.append(create_primitive_mesh(mj_model, geom_id))
@@ -641,7 +641,10 @@ def merge_geoms_hull(
   quats: list[np.ndarray] = []
 
   for geom_id in geom_ids:
-    if int(mj_model.geom_type[geom_id]) != int(mjtGeom.mjGEOM_MESH):
+    if int(mj_model.geom_type[geom_id]) not in (
+            int(mjtGeom.mjGEOM_MESH),
+            int(mjtGeom.mjGEOM_SDF),
+        ):
       continue
 
     mesh_id = int(mj_model.geom_dataid[geom_id])
