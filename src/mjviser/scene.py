@@ -16,6 +16,7 @@ from mujoco import mj_id2name, mjtGeom, mjtObj
 
 from .conversions import (
   get_body_name,
+  get_geom_texture_id,
   group_geoms_by_visual_compat,
   is_fixed_body,
   merge_geoms,
@@ -1074,7 +1075,11 @@ class ViserMujocoScene:
       body_id = self.mj_model.geom_bodyid[i]
       if not is_fixed_body(self.mj_model, body_id):
         continue
-      if self.mj_model.geom_type[i] == mjtGeom.mjGEOM_PLANE:
+      # Untextured planes render as an infinite reference grid. Textured
+      # planes fall through to the mesh path so their material shows.
+      if self.mj_model.geom_type[i] == mjtGeom.mjGEOM_PLANE and (
+        get_geom_texture_id(self.mj_model, i) < 0
+      ):
         body_name = get_body_name(self.mj_model, body_id)
         geom_name = mj_id2name(self.mj_model, mjtObj.mjOBJ_GEOM, i)
         self.server.scene.add_grid(
