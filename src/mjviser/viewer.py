@@ -6,15 +6,20 @@ import signal
 import time
 from collections.abc import Callable
 from threading import Lock
+from typing import Literal
 
 import mujoco
 import numpy as np
 import viser
+import viser.transforms as vtf
 
-from .scene import ViserMujocoScene
+from .conversions import is_fixed_body
+from .scene import BodyDragEvent, ViserMujocoScene
 
 _SPEEDS = [1 / 8, 1 / 4, 1 / 2, 1.0, 2.0, 4.0, 8.0]
 _FRAME_TIME = 1.0 / 60.0  # 60 Hz render target.
+_TRANSLATE_LINE_COLOR = (255, 120, 60)
+_ROTATE_LINE_COLOR = (120, 220, 120)
 
 
 def _format_speed(multiplier: float) -> str:
@@ -77,6 +82,26 @@ class Viewer:
     self._lock = Lock()
     self.scene.set_refresh_handler(self._refresh_scene_from_gui)
 
+    # Perturbation / drag state.
+    self.perturbation_stiffness: float = 50.0
+    self.perturbation_torque_scale: float = 2.0
+    self._drag_body_id: int | None = None
+    self._drag_mocap_id: int | None = None
+    self._drag_mode: Literal["translate", "rotate"] | None = None
+    self._drag_grab_local: np.ndarray | None = None
+    self._drag_target_world: np.ndarray | None = None
+    self._drag_start_world: np.ndarray | None = None
+    self._drag_mocap_offset: np.ndarray | None = None
+    self._drag_mocap_init_quat: np.ndarray | None = None
+    self._perturb_line_handle: viser.LineSegmentsHandle | None = None
+
+    self.scene.add_body_drag_callback(
+      self._on_body_drag, button="left", modifier="cmd/ctrl"
+    )
+    self.scene.add_body_drag_callback(
+      self._on_body_drag, button="left", modifier="cmd/ctrl+shift"
+    )
+
     # Speed.
     self._speed_idx = _SPEEDS.index(1.0)
     self._joint_sliders: list = []  # [(slider, qpos_adr), ...]
@@ -116,6 +141,7 @@ class Viewer:
       self._render_fn(self.scene)
     else:
       self.scene.update_from_mjdata(self.data)
+    self._update_perturb_visual()
 
   def _refresh_scene_from_gui(self) -> None:
     """Refresh cached visualization state under the simulation lock."""
@@ -140,6 +166,7 @@ class Viewer:
 
   def _reset(self) -> None:
     """Reset the simulation."""
+    self._clear_drag_state()
     if self._reset_fn is not None:
       self._reset_fn(self.model, self.data)
     else:
@@ -215,6 +242,7 @@ class Viewer:
     deadline = time.perf_counter() + _FRAME_TIME
     hit_deadline = False
     while self._budget >= step_dt:
+      self._apply_drag_perturbation()
       self._step_fn(self.model, self.data)
       self._budget -= step_dt
       self._step_count += 1
@@ -227,6 +255,168 @@ class Viewer:
       self._was_capped = self._budget >= step_dt
       self._budget = min(self._budget, step_dt)
     return True
+
+  def _on_body_drag(self, event: BodyDragEvent) -> None:
+    """Handle body drag events from ``ViserMujocoScene``."""
+    mocap_id = event.mocap_id
+    if mocap_id is None:
+      weld_id = int(self.model.body_weldid[event.body_id])
+      if weld_id > 0 and self.model.body_mocapid[weld_id] >= 0:
+        mocap_id = int(self.model.body_mocapid[weld_id])
+
+    if mocap_id is None and is_fixed_body(self.model, event.body_id):
+      return
+
+    mode: Literal["translate", "rotate"] = (
+      "rotate" if event.modifier == "cmd/ctrl+shift" else "translate"
+    )
+
+    with self._lock:
+      if event.phase == "start":
+        self._clear_drag_state()
+        if np.all(self.data.xmat == 0):
+          mujoco.mj_kinematics(self.model, self.data)
+
+        start_w = np.array(event.start_position, dtype=np.float64)
+        self._drag_body_id = event.body_id
+        self._drag_mocap_id = mocap_id
+        self._drag_mode = mode
+        self._drag_start_world = start_w.copy()
+        self._drag_target_world = start_w.copy()
+
+        if mocap_id is not None:
+          self._drag_mocap_offset = self.data.mocap_pos[mocap_id].copy() - start_w
+          self._drag_mocap_init_quat = self.data.mocap_quat[mocap_id].copy()
+          self._drag_grab_local = None
+        else:
+          xpos = self.data.xpos[event.body_id]
+          xmat = self.data.xmat[event.body_id].reshape(3, 3)
+          self._drag_grab_local = xmat.T @ (start_w - xpos)
+          self._apply_drag_perturbation()
+          self._update_perturb_visual()
+
+      elif event.phase == "update":
+        if self._drag_body_id != event.body_id:
+          return
+        end_w = np.array(event.end_position, dtype=np.float64)
+        self._drag_target_world = end_w
+
+        if self._drag_mocap_id is not None:
+          mid = self._drag_mocap_id
+          if self._drag_mode == "translate" and self._drag_mocap_offset is not None:
+            self.data.mocap_pos[mid] = end_w + self._drag_mocap_offset
+          elif (
+            self._drag_mode == "rotate"
+            and self._drag_start_world is not None
+            and self._drag_mocap_init_quat is not None
+          ):
+            drag_vec = end_w - self._drag_start_world
+            r_delta = vtf.SO3.exp(self.perturbation_torque_scale * drag_vec)
+            r_init = vtf.SO3(wxyz=self._drag_mocap_init_quat)
+            self.data.mocap_quat[mid] = np.asarray((r_delta @ r_init).wxyz)
+
+          if self._paused:
+            mujoco.mj_forward(self.model, self.data)
+            self._render()
+          else:
+            self._dirty = True
+        else:
+          self._apply_drag_perturbation()
+          self._update_perturb_visual()
+          self._dirty = True
+
+      elif event.phase == "end":
+        self._clear_drag_state()
+        self._dirty = True
+
+  def _apply_drag_perturbation(self) -> None:
+    """Compute and write active drag force/torque to ``data.xfrc_applied``."""
+    body_id = self._drag_body_id
+    if (
+      body_id is None
+      or self._drag_mocap_id is not None
+      or self._drag_grab_local is None
+      or self._drag_target_world is None
+    ):
+      return
+
+    xpos = self.data.xpos[body_id]
+    xmat = self.data.xmat[body_id].reshape(3, 3)
+    grab_world = xpos + xmat @ self._drag_grab_local
+    com = self.data.xipos[body_id]
+    lever = grab_world - com
+
+    if self._drag_mode == "translate":
+      force = self.perturbation_stiffness * (self._drag_target_world - grab_world)
+      torque = np.cross(lever, force)
+    elif self._drag_mode == "rotate" and self._drag_start_world is not None:
+      force = self.perturbation_stiffness * (self._drag_start_world - grab_world)
+      drag_vec = self._drag_target_world - self._drag_start_world
+      ext_torque = self.perturbation_torque_scale * drag_vec
+      torque = np.cross(lever, force) + ext_torque
+    else:
+      return
+
+    self.data.xfrc_applied[body_id, :3] = force
+    self.data.xfrc_applied[body_id, 3:] = torque
+
+  def _update_perturb_visual(self) -> None:
+    """Update or hide the 3D perturbation indicator line."""
+    body_id = self._drag_body_id
+    if (
+      body_id is None
+      or self._drag_mocap_id is not None
+      or self._drag_grab_local is None
+      or self._drag_target_world is None
+    ):
+      if self._perturb_line_handle is not None:
+        self._perturb_line_handle.visible = False
+      return
+
+    xpos = self.data.xpos[body_id]
+    xmat = self.data.xmat[body_id].reshape(3, 3)
+    grab_world = xpos + xmat @ self._drag_grab_local
+
+    if self._drag_mode == "rotate" and self._drag_start_world is not None:
+      p_start = self._drag_start_world
+      color = _ROTATE_LINE_COLOR
+    else:
+      p_start = grab_world
+      color = _TRANSLATE_LINE_COLOR
+
+    offset = self.scene.scene_offset
+    points = np.array(
+      [[p_start + offset, self._drag_target_world + offset]], dtype=np.float32
+    )
+    colors = np.full((1, 2, 3), color, dtype=np.uint8)
+
+    if self._perturb_line_handle is None:
+      self._perturb_line_handle = self._server.scene.add_line_segments(
+        "/perturbation_force",
+        points=points,
+        colors=colors,
+        line_width=3.0,
+        visible=True,
+      )
+    else:
+      self._perturb_line_handle.points = points
+      self._perturb_line_handle.colors = colors
+      self._perturb_line_handle.visible = True
+
+  def _clear_drag_state(self) -> None:
+    """Clear active drag perturbation state and zero applied forces."""
+    if self._drag_body_id is not None and self._drag_mocap_id is None:
+      self.data.xfrc_applied[self._drag_body_id] = 0.0
+    self._drag_body_id = None
+    self._drag_mocap_id = None
+    self._drag_mode = None
+    self._drag_grab_local = None
+    self._drag_target_world = None
+    self._drag_start_world = None
+    self._drag_mocap_offset = None
+    self._drag_mocap_init_quat = None
+    if self._perturb_line_handle is not None:
+      self._perturb_line_handle.visible = False
 
   def _update_stats(self) -> None:
     if self._paused:
@@ -289,6 +479,7 @@ class Viewer:
       def _(_) -> None:
         if self._paused:
           with self._lock:
+            self._apply_drag_perturbation()
             self._step_fn(self.model, self.data)
             self._step_count += 1
             self._render()
@@ -338,6 +529,7 @@ class Viewer:
           def _load_keyframe() -> None:
             idx = key_names.index(key_dropdown.value)
             with self._lock:
+              self._clear_drag_state()
               mujoco.mj_resetDataKeyframe(self.model, self.data, idx)
               mujoco.mj_forward(self.model, self.data)
               if self._reset_fn is not None:
@@ -373,9 +565,41 @@ class Viewer:
       self._setup_joint_sliders()
       self._setup_actuator_sliders()
 
-    # Physics tab (disable/enable flags).
+    # Physics tab (perturbation + disable/enable flags).
     with tabs.add_tab("Physics", icon=viser.Icon.ATOM):
+      self._setup_perturbation_gui()
       self._setup_physics_flags()
+
+  def _setup_perturbation_gui(self) -> None:
+    """Add perturbation controls and gesture instructions."""
+    with self._server.gui.add_folder("Perturbation"):
+      self._server.gui.add_markdown(
+        "**Cmd/Ctrl + Drag**: Pull & tumble body  \n"
+        "**Cmd/Ctrl + Shift + Drag**: Rotate around drag vector"
+      )
+      stiffness_slider = self._server.gui.add_slider(
+        "Stiffness",
+        min=1.0,
+        max=500.0,
+        step=1.0,
+        initial_value=self.perturbation_stiffness,
+      )
+
+      @stiffness_slider.on_update
+      def _(_) -> None:
+        self.perturbation_stiffness = float(stiffness_slider.value)
+
+      torque_slider = self._server.gui.add_slider(
+        "Torque Scale",
+        min=0.1,
+        max=50.0,
+        step=0.1,
+        initial_value=self.perturbation_torque_scale,
+      )
+
+      @torque_slider.on_update
+      def _(_) -> None:
+        self.perturbation_torque_scale = float(torque_slider.value)
 
   _MAX_SLIDERS: int = 200
 

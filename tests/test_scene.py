@@ -1,8 +1,10 @@
+import asyncio
+
 import mujoco
 import numpy as np
 import viser
 
-from mjviser import ViserMujocoScene
+from mjviser import BodyDragEvent, ViserMujocoScene
 from mjviser.conversions import is_fixed_body
 
 _MESH_BODY_XML = """
@@ -412,6 +414,83 @@ def test_autoconnect_capsules_match_mujoco_connector_sizes():
   scene._autoconnect_hide_meshes = True
   scene._sync_visibilities()
   assert not any(handle.visible for handle in scene._fixed_geom_handles.values())
+
+  try:
+    server.stop()
+  except RuntimeError:
+    pass
+
+
+def test_body_drag_callback_registration_and_dispatch():
+  xml = """
+  <mujoco>
+    <worldbody>
+      <body name="box_a" pos="0 0 1">
+        <joint type="free"/>
+        <geom type="box" size="0.2 0.2 0.2"/>
+      </body>
+      <body name="box_b" pos="1 0 1">
+        <joint type="free"/>
+        <geom type="box" size="0.2 0.2 0.2"/>
+      </body>
+      <body name="mocap_target" mocap="true" pos="2 0 1">
+        <geom type="sphere" size="0.1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  """
+  server = viser.ViserServer(port=0)
+  model = mujoco.MjModel.from_xml_string(xml)
+  scene = ViserMujocoScene(server, model, num_envs=2)
+
+  received: list[BodyDragEvent] = []
+
+  @scene.on_body_drag("left", modifier="cmd/ctrl")
+  def _on_drag(event: BodyDragEvent) -> None:
+    received.append(event)
+
+  assert len(scene._mesh_groups) == 2
+  for mg in scene._mesh_groups:
+    assert mg.handle._has_any_drag_callbacks()
+
+  # Find the batched group containing box_a and box_b (N=2 bodies, 2 envs => 4 instances).
+  box_mg = next(mg for mg in scene._mesh_groups if mg.mocap_ids is None)
+  handler = scene._make_mesh_group_drag_handler(box_mg, _on_drag)
+
+  # Instance 3 -> env_idx = 3 // 2 = 1, body_idx = 3 % 2 = 1 (box_b)
+  fake_event = viser.SceneNodeDragEvent(
+    client=None,  # type: ignore[arg-type]
+    client_id=0,
+    target=box_mg.handle,
+    phase="start",
+    instance_index=3,
+    start_position=(1.0, 2.0, 3.0),
+    start_screen_pos=(0.5, 0.5),
+    end_position=(1.5, 2.5, 3.5),
+    end_screen_pos=(0.6, 0.6),
+    button="left",
+    modifier="cmd/ctrl",
+  )
+  asyncio.run(handler(fake_event))
+
+  assert len(received) == 1
+  ev = received[0]
+  assert ev.body_name == "box_b"
+  assert ev.env_idx == 1
+  assert ev.mocap_id is None
+  assert ev.phase == "start"
+  assert ev.start_position == (1.0, 2.0, 3.0)
+  assert ev.end_position == (1.5, 2.5, 3.5)
+
+  # Test rebuild_visual_handles preserves drag callbacks.
+  scene.rebuild_visual_handles()
+  for mg in scene._mesh_groups:
+    assert mg.handle._has_any_drag_callbacks()
+
+  # Test remove_body_drag_callbacks clears callbacks.
+  scene.remove_body_drag_callbacks()
+  for mg in scene._mesh_groups:
+    assert not mg.handle._has_any_drag_callbacks()
 
   try:
     server.stop()

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from threading import RLock
+from typing import Any, Literal
 
 import mujoco
 import numpy as np
@@ -22,6 +24,36 @@ from .conversions import (
   merge_geoms_hull,
   merge_sites,
 )
+
+DragButton = Literal["left", "middle", "right"]
+DragPhase = Literal["start", "update", "end"]
+KeyModifier = Literal[
+  "cmd/ctrl",
+  "alt",
+  "shift",
+  "cmd/ctrl+alt",
+  "cmd/ctrl+shift",
+  "alt+shift",
+  "cmd/ctrl+alt+shift",
+]
+
+
+@dataclasses.dataclass(frozen=True)
+class BodyDragEvent:
+  """Event passed to body drag callbacks registered on ``ViserMujocoScene``."""
+
+  client: viser.ClientHandle
+  phase: DragPhase
+  body_id: int
+  body_name: str
+  env_idx: int
+  mocap_id: int | None
+  start_position: tuple[float, float, float]
+  end_position: tuple[float, float, float]
+  start_screen_pos: tuple[float, float]
+  end_screen_pos: tuple[float, float]
+  button: DragButton
+  modifier: KeyModifier | None
 
 
 @dataclasses.dataclass
@@ -146,6 +178,9 @@ class ViserMujocoScene:
     self._show_convex_hull: bool = False
     self._hull_hide_meshes: bool = False
     self._autoconnect_hide_meshes: bool = False
+    self._body_drag_callbacks: list[
+      tuple[DragButton, KeyModifier | None, Callable[[BodyDragEvent], Any]]
+    ] = []
 
     # Visualization settings.
     self.env_idx = 0
@@ -265,10 +300,70 @@ class ViserMujocoScene:
         handle.visible = value
       self._sync_visibilities()
 
+  @property
+  def scene_offset(self) -> np.ndarray:
+    """Current world-to-scene translation offset applied for camera tracking."""
+    with self._update_lock:
+      return self._scene_offset.copy()
+
   def set_refresh_handler(self, handler: Callable[[], None] | None) -> None:
     """Install a callback used to refresh cached visualization state."""
     with self._update_lock:
       self._refresh_handler = handler
+
+  def add_body_drag_callback(
+    self,
+    callback: Callable[[BodyDragEvent], Any],
+    button: DragButton = "left",
+    modifier: KeyModifier | None = "cmd/ctrl",
+  ) -> None:
+    """Register a callback to receive ``BodyDragEvent`` updates when a body is dragged.
+
+    Args:
+      callback: Function or coroutine function taking a ``BodyDragEvent``.
+      button: Mouse button that triggers the drag (``"left"``, ``"middle"``, ``"right"``).
+      modifier: Key modifier combination required at drag start, or ``None``.
+    """
+    entry = (button, modifier, callback)
+    with self._update_lock:
+      if entry in self._body_drag_callbacks:
+        return
+      self._body_drag_callbacks.append(entry)
+      self._bind_drag_entry_to_all_handles(button, modifier, callback)
+
+  def on_body_drag(
+    self,
+    button: DragButton | Callable[[BodyDragEvent], Any] = "left",
+    *,
+    modifier: KeyModifier | None = "cmd/ctrl",
+  ) -> Any:
+    """Decorator to register a body drag callback on the scene.
+
+    Can be used as ``@scene.on_body_drag`` or
+    ``@scene.on_body_drag("left", modifier="cmd/ctrl")``.
+    """
+    if callable(button):
+      self.add_body_drag_callback(button, button="left", modifier=modifier)
+      return button
+
+    def _decorator(
+      cb: Callable[[BodyDragEvent], Any],
+    ) -> Callable[[BodyDragEvent], Any]:
+      self.add_body_drag_callback(cb, button=button, modifier=modifier)
+      return cb
+
+    return _decorator
+
+  def remove_body_drag_callbacks(self) -> None:
+    """Remove all registered body drag callbacks from the scene."""
+    with self._update_lock:
+      self._body_drag_callbacks.clear()
+      for mg in self._mesh_groups:
+        mg.handle.remove_drag_callback()
+      for handle in self._fixed_geom_handles.values():
+        handle.remove_drag_callback()
+      for handle, _ in self._hull_dynamic_handles:
+        handle.remove_drag_callback()
 
   def rebuild_visual_handles(self) -> None:
     """Rebuild handles whose geometry or appearance is baked at creation time."""
@@ -1109,6 +1204,7 @@ class ViserMujocoScene:
           visible=visible,
         )
         self._fixed_geom_handles[(body_id, group_id, sub_idx)] = handle
+    self._bind_drag_callbacks_to_fixed_geoms()
 
   @staticmethod
   def _geom_subgroup_fingerprint(
@@ -1187,6 +1283,7 @@ class ViserMujocoScene:
             [self.mj_model.body_mocapid[b] for b in body_ids], dtype=np.int32
           )
         self._mesh_groups.append(_MeshGroup(handle, body_ids_arr, group_id, mocap_ids))
+    self._bind_drag_callbacks_to_mesh_groups()
 
   def _add_fixed_sites(self) -> None:
     """Add fixed site geometry to the scene as static nodes."""
@@ -1313,6 +1410,7 @@ class ViserMujocoScene:
         lod="off",
       )
       self._hull_dynamic_handles.append((handle, body_id))
+    self._bind_drag_callbacks_to_hull_handles()
 
   def _clear_hull_handles(self) -> None:
     """Remove convex hull handles and clear their caches."""
@@ -1323,6 +1421,153 @@ class ViserMujocoScene:
     for handle, _ in self._hull_dynamic_handles:
       handle.remove()
     self._hull_dynamic_handles.clear()
+
+  def _bind_drag_entry_to_all_handles(
+    self,
+    button: DragButton,
+    modifier: KeyModifier | None,
+    callback: Callable[[BodyDragEvent], Any],
+  ) -> None:
+    """Bind a single (button, modifier, callback) entry to all current handles."""
+    for mg in self._mesh_groups:
+      mg.handle.on_drag(button, modifier=modifier)(
+        self._make_mesh_group_drag_handler(mg, callback)
+      )
+    for (body_id, _, _), handle in self._fixed_geom_handles.items():
+      handle.on_drag(button, modifier=modifier)(
+        self._make_fixed_drag_handler(body_id, callback)
+      )
+    for handle, body_id in self._hull_dynamic_handles:
+      handle.on_drag(button, modifier=modifier)(
+        self._make_hull_drag_handler(body_id, callback)
+      )
+
+  def _bind_drag_callbacks_to_mesh_groups(self) -> None:
+    """Attach all registered body drag callbacks to current mesh group handles."""
+    for button, modifier, callback in self._body_drag_callbacks:
+      for mg in self._mesh_groups:
+        mg.handle.on_drag(button, modifier=modifier)(
+          self._make_mesh_group_drag_handler(mg, callback)
+        )
+
+  def _bind_drag_callbacks_to_fixed_geoms(self) -> None:
+    """Attach all registered body drag callbacks to current fixed geom handles."""
+    for button, modifier, callback in self._body_drag_callbacks:
+      for (body_id, _, _), handle in self._fixed_geom_handles.items():
+        handle.on_drag(button, modifier=modifier)(
+          self._make_fixed_drag_handler(body_id, callback)
+        )
+
+  def _bind_drag_callbacks_to_hull_handles(self) -> None:
+    """Attach all registered body drag callbacks to current dynamic hull handles."""
+    for button, modifier, callback in self._body_drag_callbacks:
+      for handle, body_id in self._hull_dynamic_handles:
+        handle.on_drag(button, modifier=modifier)(
+          self._make_hull_drag_handler(body_id, callback)
+        )
+
+  def _make_mesh_group_drag_handler(
+    self,
+    mg: _MeshGroup,
+    callback: Callable[[BodyDragEvent], Any],
+  ) -> Callable[[viser.SceneNodeDragEvent[Any]], Coroutine[Any, Any, None]]:
+    async def _handler(event: viser.SceneNodeDragEvent[Any]) -> None:
+      idx = event.instance_index
+      if idx is None:
+        return
+      n_bodies = len(mg.body_ids)
+      if n_bodies == 0:
+        return
+      with self._update_lock:
+        slice_single = self.show_only_selected and self.num_envs > 1
+        last_env_idx = self._last_env_idx
+        offset = self._scene_offset.copy()
+      body_idx = idx % n_bodies
+      env_idx = last_env_idx if slice_single else idx // n_bodies
+      if env_idx < 0 or env_idx >= self.num_envs:
+        return
+      body_id = int(mg.body_ids[body_idx])
+      mocap_id = int(mg.mocap_ids[body_idx]) if mg.mocap_ids is not None else None
+      await self._dispatch_body_drag(
+        event, body_id, env_idx, mocap_id, offset, callback
+      )
+
+    return _handler
+
+  def _make_hull_drag_handler(
+    self,
+    body_id: int,
+    callback: Callable[[BodyDragEvent], Any],
+  ) -> Callable[[viser.SceneNodeDragEvent[Any]], Coroutine[Any, Any, None]]:
+    raw_mocap = int(self.mj_model.body_mocapid[body_id])
+    mocap_id = raw_mocap if raw_mocap >= 0 else None
+
+    async def _handler(event: viser.SceneNodeDragEvent[Any]) -> None:
+      idx = event.instance_index
+      if idx is None:
+        return
+      with self._update_lock:
+        slice_single = self.show_only_selected and self.num_envs > 1
+        last_env_idx = self._last_env_idx
+        offset = self._scene_offset.copy()
+      env_idx = last_env_idx if slice_single else idx
+      if env_idx < 0 or env_idx >= self.num_envs:
+        return
+      await self._dispatch_body_drag(
+        event, body_id, env_idx, mocap_id, offset, callback
+      )
+
+    return _handler
+
+  def _make_fixed_drag_handler(
+    self,
+    body_id: int,
+    callback: Callable[[BodyDragEvent], Any],
+  ) -> Callable[[viser.SceneNodeDragEvent[Any]], Coroutine[Any, Any, None]]:
+    async def _handler(event: viser.SceneNodeDragEvent[Any]) -> None:
+      with self._update_lock:
+        env_idx = self._last_env_idx
+        offset = self._scene_offset.copy()
+      await self._dispatch_body_drag(event, body_id, env_idx, None, offset, callback)
+
+    return _handler
+
+  async def _dispatch_body_drag(
+    self,
+    event: viser.SceneNodeDragEvent[Any],
+    body_id: int,
+    env_idx: int,
+    mocap_id: int | None,
+    offset: np.ndarray,
+    callback: Callable[[BodyDragEvent], Any],
+  ) -> None:
+    start_pos = (
+      float(event.start_position[0] - offset[0]),
+      float(event.start_position[1] - offset[1]),
+      float(event.start_position[2] - offset[2]),
+    )
+    end_pos = (
+      float(event.end_position[0] - offset[0]),
+      float(event.end_position[1] - offset[1]),
+      float(event.end_position[2] - offset[2]),
+    )
+    body_event = BodyDragEvent(
+      client=event.client,
+      phase=event.phase,
+      body_id=body_id,
+      body_name=get_body_name(self.mj_model, body_id),
+      env_idx=env_idx,
+      mocap_id=mocap_id,
+      start_position=start_pos,
+      end_position=end_pos,
+      start_screen_pos=event.start_screen_pos,
+      end_screen_pos=event.end_screen_pos,
+      button=event.button,
+      modifier=event.modifier,
+    )
+    res = callback(body_event)
+    if inspect.isawaitable(res):
+      await res
 
   def _clear_decor_handles(self) -> None:
     """Remove decor handles and clear their cache."""
