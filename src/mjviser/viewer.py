@@ -82,7 +82,10 @@ class Viewer:
     self.scene.set_refresh_handler(self._refresh_scene_from_gui)
 
     # Perturbation / drag state (backed by MuJoCo's MjvPerturb).
-    self.perturbation_stiffness: float = 100.0
+    default_stiffness = float(model.vis.map.stiffness)
+    self.perturbation_stiffness: float = (
+      default_stiffness if default_stiffness > 0.0 else 100.0
+    )
     self.perturbation_torque_scale: float = 1.0
     self._pert = mujoco.MjvPerturb()
     self._drag_start_world: np.ndarray | None = None
@@ -293,9 +296,7 @@ class Viewer:
         self._pert.select = body_id
         self._pert.localpos[:] = xmat.T @ (start_w - xpos)
         self._pert.scale = 1.0
-        self._pert.localmass = float(self.model.body_subtreemass[body_id]) * (
-          self.perturbation_stiffness / 100.0
-        )
+        self._pert.localmass = self._compute_localmass(body_id)
         self._pert.refpos[:] = xpos
         self._pert.refquat[:] = xquat
         self._pert.refselpos[:] = start_w
@@ -341,16 +342,24 @@ class Viewer:
         self._clear_drag_state()
         self._dirty = True
 
-  def _apply_drag_perturbation(self) -> None:
+  def _compute_localmass(self, body_id: int) -> float:
+    """Compute ``MjvPerturb.localmass`` so ``perturbation_stiffness`` is in N/(m*kg)."""
+    map_stiffness = float(self.model.vis.map.stiffness)
+    if map_stiffness <= 0.0:
+      map_stiffness = 100.0
+    return float(self.model.body_subtreemass[body_id]) * (
+      self.perturbation_stiffness / map_stiffness
+    )
+
+  def _apply_drag_perturbation(self, *, apply_force: bool | None = None) -> None:
     """Apply active ``MjvPerturb`` pose and force to ``self.data``."""
     if self._pert.active == 0 or self._pert.select <= 0:
       return
     body_id = int(self._pert.select)
-    self._pert.localmass = float(self.model.body_subtreemass[body_id]) * (
-      self.perturbation_stiffness / 100.0
-    )
-    mujoco.mjv_applyPerturbPose(self.model, self.data, self._pert, int(self._paused))
-    if not self._paused:
+    self._pert.localmass = self._compute_localmass(body_id)
+    use_force = (not self._paused) if apply_force is None else apply_force
+    mujoco.mjv_applyPerturbPose(self.model, self.data, self._pert, int(not use_force))
+    if use_force:
       mujoco.mjv_applyPerturbForce(self.model, self.data, self._pert)
     else:
       mujoco.mj_forward(self.model, self.data)
@@ -359,12 +368,14 @@ class Viewer:
     """Update or hide the 3D perturbation indicator line."""
     body_id = int(self._pert.select)
     active = int(self._pert.active)
+    paused = self._paused
     start_world = self._drag_start_world
     end_world = self._drag_end_world
     localpos = np.array(self._pert.localpos, dtype=np.float64)
 
     if (
-      active == 0
+      paused
+      or active == 0
       or body_id <= 0
       or self.model.body_mocapid[body_id] >= 0
       or start_world is None
@@ -476,7 +487,7 @@ class Viewer:
       def _(_) -> None:
         if self._paused:
           with self._lock:
-            self._apply_drag_perturbation()
+            self._apply_drag_perturbation(apply_force=True)
             self._step_fn(self.model, self.data)
             self._step_count += 1
             self._render()
@@ -572,12 +583,13 @@ class Viewer:
     with self._server.gui.add_folder("Perturbation"):
       self._server.gui.add_markdown(
         "**Cmd/Ctrl + Drag**: Pull & tumble body  \n"
-        "**Cmd/Ctrl + Shift + Drag**: Rotate around drag vector"
+        "**Cmd/Ctrl + Shift + Drag**: Rotate around drag vector  \n"
+        "*While paused, dragging repositions free and mocap bodies directly.*"
       )
       stiffness_slider = self._server.gui.add_slider(
         "Stiffness",
         min=1.0,
-        max=500.0,
+        max=max(500.0, self.perturbation_stiffness),
         step=1.0,
         initial_value=self.perturbation_stiffness,
       )

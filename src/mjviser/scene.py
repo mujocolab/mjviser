@@ -370,11 +370,12 @@ class ViserMujocoScene:
   def remove_body_drag_callback(self, callback: Callable[[BodyDragEvent], Any]) -> None:
     """Remove a specific body drag callback without disturbing other registrations."""
     with self._update_lock:
+      live_ids = self._live_drag_handle_ids()
       remaining: list[_BodyDragRegistration] = []
       for reg in self._body_drag_callbacks:
         if reg.callback == callback:
           for handle, wrapper in reg.bound_wrappers:
-            if not handle._impl.removed:
+            if id(handle) in live_ids:
               handle.remove_drag_callback(wrapper)
         else:
           remaining.append(reg)
@@ -383,9 +384,10 @@ class ViserMujocoScene:
   def remove_body_drag_callbacks(self) -> None:
     """Remove all registered body drag callbacks from the scene."""
     with self._update_lock:
+      live_ids = self._live_drag_handle_ids()
       for reg in self._body_drag_callbacks:
         for handle, wrapper in reg.bound_wrappers:
-          if not handle._impl.removed:
+          if id(handle) in live_ids:
             handle.remove_drag_callback(wrapper)
       self._body_drag_callbacks.clear()
 
@@ -1446,17 +1448,23 @@ class ViserMujocoScene:
       handle.remove()
     self._hull_dynamic_handles.clear()
 
+  def _live_drag_handle_ids(self) -> set[int]:
+    """Return object IDs of currently active scene handles that support body dragging."""
+    live: set[int] = {id(mg.handle) for mg in self._mesh_groups}
+    live.update(id(handle) for handle in self._fixed_geom_handles.values())
+    live.update(id(handle) for handle, _ in self._hull_dynamic_handles)
+    return live
+
   def _bind_drag_callbacks(
     self,
     kinds: tuple[Literal["mesh", "fixed", "hull"], ...] = ("mesh", "fixed", "hull"),
     registrations: list[_BodyDragRegistration] | None = None,
   ) -> None:
     """Bind registered body drag callbacks to the specified handle collections."""
+    live_ids = self._live_drag_handle_ids()
     regs = registrations if registrations is not None else self._body_drag_callbacks
     for reg in regs:
-      reg.bound_wrappers = [
-        (h, w) for h, w in reg.bound_wrappers if not h._impl.removed
-      ]
+      reg.bound_wrappers = [(h, w) for h, w in reg.bound_wrappers if id(h) in live_ids]
       if "mesh" in kinds:
         for mg in self._mesh_groups:
           wrapper = self._make_mesh_group_drag_handler(mg, reg.callback)

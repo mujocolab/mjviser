@@ -241,3 +241,29 @@ def test_viewer_ignores_fixed_body_drag(viewer: Viewer) -> None:
     _make_event("start", wall_id, "fixed_wall", (0.0, -1.0, 0.0), (0.0, -1.0, 0.0))
   )
   assert viewer._drag_body_id is None
+
+
+def test_viewer_custom_map_stiffness_and_paused_step(viewer: Viewer) -> None:
+  box_id = mujoco.mj_name2id(viewer.model, mujoco.mjtObj.mjOBJ_BODY, "box")
+  # Even if the model specifies <map stiffness="400"/>, perturbation_stiffness=100
+  # still produces 100 N/m per kg of subtree mass.
+  viewer.model.vis.map.stiffness = 400.0
+  viewer.perturbation_stiffness = 100.0
+
+  viewer._on_body_drag(
+    _make_event("start", box_id, "box", (0.0, 0.0, 1.0), (0.0, 0.0, 1.0))
+  )
+  viewer._on_body_drag(
+    _make_event("update", box_id, "box", (0.0, 0.0, 1.0), (0.0, 1.0, 1.0))
+  )
+  np.testing.assert_allclose(viewer.data.xfrc_applied[box_id, :3], [0.0, 100.0, 0.0])
+
+  # While paused, the perturbation force line is hidden, and single-step applies force.
+  viewer._paused = True
+  viewer._update_perturb_visual()
+  assert viewer._perturb_line_handle is not None
+  assert not viewer._perturb_line_handle.visible
+
+  viewer.data.xfrc_applied[box_id] = 0.0
+  viewer._apply_drag_perturbation(apply_force=True)
+  np.testing.assert_allclose(viewer.data.xfrc_applied[box_id, :3], [0.0, 100.0, 0.0])
