@@ -66,6 +66,18 @@ class _MeshGroup:
   mocap_ids: np.ndarray | None  # (N,) int32 mocap IDs, or None if non-mocap
 
 
+@dataclasses.dataclass
+class _BodyDragRegistration:
+  """Registered body drag callback and its per-handle Viser wrapper functions."""
+
+  button: DragButton
+  modifier: KeyModifier | None
+  callback: Callable[[BodyDragEvent], Any]
+  bound_wrappers: list[tuple[Any, Callable[..., Any]]] = dataclasses.field(
+    default_factory=list
+  )
+
+
 # Viser visualization defaults.
 _DEFAULT_FOV_DEGREES = 60
 _DEFAULT_FOV_MIN = 20
@@ -178,9 +190,7 @@ class ViserMujocoScene:
     self._show_convex_hull: bool = False
     self._hull_hide_meshes: bool = False
     self._autoconnect_hide_meshes: bool = False
-    self._body_drag_callbacks: list[
-      tuple[DragButton, KeyModifier | None, Callable[[BodyDragEvent], Any]]
-    ] = []
+    self._body_drag_callbacks: list[_BodyDragRegistration] = []
 
     # Visualization settings.
     self.env_idx = 0
@@ -324,12 +334,15 @@ class ViserMujocoScene:
       button: Mouse button that triggers the drag (``"left"``, ``"middle"``, ``"right"``).
       modifier: Key modifier combination required at drag start, or ``None``.
     """
-    entry = (button, modifier, callback)
     with self._update_lock:
-      if entry in self._body_drag_callbacks:
-        return
-      self._body_drag_callbacks.append(entry)
-      self._bind_drag_entry_to_all_handles(button, modifier, callback)
+      for reg in self._body_drag_callbacks:
+        if (
+          reg.button == button and reg.modifier == modifier and reg.callback == callback
+        ):
+          return
+      reg = _BodyDragRegistration(button=button, modifier=modifier, callback=callback)
+      self._body_drag_callbacks.append(reg)
+      self._bind_drag_callbacks(registrations=[reg])
 
   def on_body_drag(
     self,
@@ -354,16 +367,27 @@ class ViserMujocoScene:
 
     return _decorator
 
+  def remove_body_drag_callback(self, callback: Callable[[BodyDragEvent], Any]) -> None:
+    """Remove a specific body drag callback without disturbing other registrations."""
+    with self._update_lock:
+      remaining: list[_BodyDragRegistration] = []
+      for reg in self._body_drag_callbacks:
+        if reg.callback == callback:
+          for handle, wrapper in reg.bound_wrappers:
+            if not handle._impl.removed:
+              handle.remove_drag_callback(wrapper)
+        else:
+          remaining.append(reg)
+      self._body_drag_callbacks = remaining
+
   def remove_body_drag_callbacks(self) -> None:
     """Remove all registered body drag callbacks from the scene."""
     with self._update_lock:
+      for reg in self._body_drag_callbacks:
+        for handle, wrapper in reg.bound_wrappers:
+          if not handle._impl.removed:
+            handle.remove_drag_callback(wrapper)
       self._body_drag_callbacks.clear()
-      for mg in self._mesh_groups:
-        mg.handle.remove_drag_callback()
-      for handle in self._fixed_geom_handles.values():
-        handle.remove_drag_callback()
-      for handle, _ in self._hull_dynamic_handles:
-        handle.remove_drag_callback()
 
   def rebuild_visual_handles(self) -> None:
     """Rebuild handles whose geometry or appearance is baked at creation time."""
@@ -1204,7 +1228,7 @@ class ViserMujocoScene:
           visible=visible,
         )
         self._fixed_geom_handles[(body_id, group_id, sub_idx)] = handle
-    self._bind_drag_callbacks_to_fixed_geoms()
+    self._bind_drag_callbacks(kinds=("fixed",))
 
   @staticmethod
   def _geom_subgroup_fingerprint(
@@ -1283,7 +1307,7 @@ class ViserMujocoScene:
             [self.mj_model.body_mocapid[b] for b in body_ids], dtype=np.int32
           )
         self._mesh_groups.append(_MeshGroup(handle, body_ids_arr, group_id, mocap_ids))
-    self._bind_drag_callbacks_to_mesh_groups()
+    self._bind_drag_callbacks(kinds=("mesh",))
 
   def _add_fixed_sites(self) -> None:
     """Add fixed site geometry to the scene as static nodes."""
@@ -1410,7 +1434,7 @@ class ViserMujocoScene:
         lod="off",
       )
       self._hull_dynamic_handles.append((handle, body_id))
-    self._bind_drag_callbacks_to_hull_handles()
+    self._bind_drag_callbacks(kinds=("hull",))
 
   def _clear_hull_handles(self) -> None:
     """Remove convex hull handles and clear their caches."""
@@ -1422,49 +1446,32 @@ class ViserMujocoScene:
       handle.remove()
     self._hull_dynamic_handles.clear()
 
-  def _bind_drag_entry_to_all_handles(
+  def _bind_drag_callbacks(
     self,
-    button: DragButton,
-    modifier: KeyModifier | None,
-    callback: Callable[[BodyDragEvent], Any],
+    kinds: tuple[Literal["mesh", "fixed", "hull"], ...] = ("mesh", "fixed", "hull"),
+    registrations: list[_BodyDragRegistration] | None = None,
   ) -> None:
-    """Bind a single (button, modifier, callback) entry to all current handles."""
-    for mg in self._mesh_groups:
-      mg.handle.on_drag(button, modifier=modifier)(
-        self._make_mesh_group_drag_handler(mg, callback)
-      )
-    for (body_id, _, _), handle in self._fixed_geom_handles.items():
-      handle.on_drag(button, modifier=modifier)(
-        self._make_fixed_drag_handler(body_id, callback)
-      )
-    for handle, body_id in self._hull_dynamic_handles:
-      handle.on_drag(button, modifier=modifier)(
-        self._make_hull_drag_handler(body_id, callback)
-      )
-
-  def _bind_drag_callbacks_to_mesh_groups(self) -> None:
-    """Attach all registered body drag callbacks to current mesh group handles."""
-    for button, modifier, callback in self._body_drag_callbacks:
-      for mg in self._mesh_groups:
-        mg.handle.on_drag(button, modifier=modifier)(
-          self._make_mesh_group_drag_handler(mg, callback)
-        )
-
-  def _bind_drag_callbacks_to_fixed_geoms(self) -> None:
-    """Attach all registered body drag callbacks to current fixed geom handles."""
-    for button, modifier, callback in self._body_drag_callbacks:
-      for (body_id, _, _), handle in self._fixed_geom_handles.items():
-        handle.on_drag(button, modifier=modifier)(
-          self._make_fixed_drag_handler(body_id, callback)
-        )
-
-  def _bind_drag_callbacks_to_hull_handles(self) -> None:
-    """Attach all registered body drag callbacks to current dynamic hull handles."""
-    for button, modifier, callback in self._body_drag_callbacks:
-      for handle, body_id in self._hull_dynamic_handles:
-        handle.on_drag(button, modifier=modifier)(
-          self._make_hull_drag_handler(body_id, callback)
-        )
+    """Bind registered body drag callbacks to the specified handle collections."""
+    regs = registrations if registrations is not None else self._body_drag_callbacks
+    for reg in regs:
+      reg.bound_wrappers = [
+        (h, w) for h, w in reg.bound_wrappers if not h._impl.removed
+      ]
+      if "mesh" in kinds:
+        for mg in self._mesh_groups:
+          wrapper = self._make_mesh_group_drag_handler(mg, reg.callback)
+          mg.handle.on_drag(reg.button, modifier=reg.modifier)(wrapper)
+          reg.bound_wrappers.append((mg.handle, wrapper))
+      if "fixed" in kinds:
+        for (body_id, _, _), handle in self._fixed_geom_handles.items():
+          wrapper = self._make_fixed_drag_handler(body_id, reg.callback)
+          handle.on_drag(reg.button, modifier=reg.modifier)(wrapper)
+          reg.bound_wrappers.append((handle, wrapper))
+      if "hull" in kinds:
+        for handle, body_id in self._hull_dynamic_handles:
+          wrapper = self._make_hull_drag_handler(body_id, reg.callback)
+          handle.on_drag(reg.button, modifier=reg.modifier)(wrapper)
+          reg.bound_wrappers.append((handle, wrapper))
 
   def _make_mesh_group_drag_handler(
     self,
@@ -1541,6 +1548,11 @@ class ViserMujocoScene:
     offset: np.ndarray,
     callback: Callable[[BodyDragEvent], Any],
   ) -> None:
+    # Handlers are declared ``async def`` and invoke synchronous callbacks inline on
+    # Viser's event loop on purpose: Viser submits non-async callbacks to a thread pool
+    # where ``update`` / ``end`` phases can race ahead of ``start``. Running inline on
+    # the event loop guarantees strict ``start`` -> ``update`` -> ``end`` ordering, at
+    # the cost of briefly blocking the event loop if a callback waits on a lock.
     start_pos = (
       float(event.start_position[0] - offset[0]),
       float(event.start_position[1] - offset[1]),

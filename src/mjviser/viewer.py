@@ -6,7 +6,6 @@ import signal
 import time
 from collections.abc import Callable
 from threading import Lock
-from typing import Literal
 
 import mujoco
 import numpy as np
@@ -82,17 +81,14 @@ class Viewer:
     self._lock = Lock()
     self.scene.set_refresh_handler(self._refresh_scene_from_gui)
 
-    # Perturbation / drag state.
-    self.perturbation_stiffness: float = 50.0
-    self.perturbation_torque_scale: float = 2.0
-    self._drag_body_id: int | None = None
-    self._drag_mocap_id: int | None = None
-    self._drag_mode: Literal["translate", "rotate"] | None = None
-    self._drag_grab_local: np.ndarray | None = None
-    self._drag_target_world: np.ndarray | None = None
+    # Perturbation / drag state (backed by MuJoCo's MjvPerturb).
+    self.perturbation_stiffness: float = 100.0
+    self.perturbation_torque_scale: float = 1.0
+    self._pert = mujoco.MjvPerturb()
     self._drag_start_world: np.ndarray | None = None
-    self._drag_mocap_offset: np.ndarray | None = None
-    self._drag_mocap_init_quat: np.ndarray | None = None
+    self._drag_end_world: np.ndarray | None = None
+    self._drag_init_xpos: np.ndarray | None = None
+    self._drag_init_xquat: np.ndarray | None = None
     self._perturb_line_handle: viser.LineSegmentsHandle | None = None
 
     self.scene.add_body_drag_callback(
@@ -126,6 +122,12 @@ class Viewer:
     self._stats_last_time = 0.0
     self._fps = 0.0
     self._sps = 0.0
+
+  @property
+  def _drag_body_id(self) -> int | None:
+    if self._pert.active != 0 and self._pert.select > 0:
+      return int(self._pert.select)
+    return None
 
   @property
   def speed(self) -> float:
@@ -222,8 +224,9 @@ class Viewer:
       self._time_until_next_render = 0.0
 
     if self._dirty or self.scene.needs_update:
-      self._dirty = False
-      self._render()
+      with self._lock:
+        self._dirty = False
+        self._render()
     self._stats_frames += 1
     self._update_stats()
 
@@ -257,117 +260,115 @@ class Viewer:
     return True
 
   def _on_body_drag(self, event: BodyDragEvent) -> None:
-    """Handle body drag events from ``ViserMujocoScene``."""
-    mocap_id = event.mocap_id
-    if mocap_id is None:
-      weld_id = int(self.model.body_weldid[event.body_id])
-      if weld_id > 0 and self.model.body_mocapid[weld_id] >= 0:
-        mocap_id = int(self.model.body_mocapid[weld_id])
+    """Handle body drag events from ``ViserMujocoScene``.
 
-    if mocap_id is None and is_fixed_body(self.model, event.body_id):
+    Runs synchronously on Viser's event loop (invoked by ``_dispatch_body_drag``)
+    so ``start``/``update``/``end`` phases are strictly ordered, acquiring
+    ``self._lock`` briefly to update ``self._pert`` and ``self.data``.
+    """
+    body_id = event.body_id
+    weld_id = int(self.model.body_weldid[body_id])
+    if weld_id > 0 and self.model.body_mocapid[weld_id] >= 0:
+      body_id = weld_id
+
+    if is_fixed_body(self.model, body_id):
       return
-
-    mode: Literal["translate", "rotate"] = (
-      "rotate" if event.modifier == "cmd/ctrl+shift" else "translate"
-    )
 
     with self._lock:
       if event.phase == "start":
         self._clear_drag_state()
         if np.all(self.data.xmat == 0):
-          mujoco.mj_kinematics(self.model, self.data)
+          mujoco.mj_forward(self.model, self.data)
 
         start_w = np.array(event.start_position, dtype=np.float64)
-        self._drag_body_id = event.body_id
-        self._drag_mocap_id = mocap_id
-        self._drag_mode = mode
-        self._drag_start_world = start_w.copy()
-        self._drag_target_world = start_w.copy()
+        xpos = self.data.xpos[body_id].copy()
+        xquat = self.data.xquat[body_id].copy()
+        xmat = self.data.xmat[body_id].reshape(3, 3)
 
-        if mocap_id is not None:
-          self._drag_mocap_offset = self.data.mocap_pos[mocap_id].copy() - start_w
-          self._drag_mocap_init_quat = self.data.mocap_quat[mocap_id].copy()
-          self._drag_grab_local = None
+        self._drag_start_world = start_w
+        self._drag_end_world = start_w.copy()
+        self._drag_init_xpos = xpos
+        self._drag_init_xquat = xquat
+
+        self._pert.select = body_id
+        self._pert.localpos[:] = xmat.T @ (start_w - xpos)
+        self._pert.scale = 1.0
+        self._pert.localmass = float(self.model.body_subtreemass[body_id]) * (
+          self.perturbation_stiffness / 100.0
+        )
+        self._pert.refpos[:] = xpos
+        self._pert.refquat[:] = xquat
+        self._pert.refselpos[:] = start_w
+        if event.modifier == "cmd/ctrl+shift":
+          self._pert.active = int(
+            mujoco.mjtPertBit.mjPERT_TRANSLATE | mujoco.mjtPertBit.mjPERT_ROTATE
+          )
         else:
-          xpos = self.data.xpos[event.body_id]
-          xmat = self.data.xmat[event.body_id].reshape(3, 3)
-          self._drag_grab_local = xmat.T @ (start_w - xpos)
-          self._apply_drag_perturbation()
-          self._update_perturb_visual()
+          self._pert.active = int(mujoco.mjtPertBit.mjPERT_TRANSLATE)
+
+        self._apply_drag_perturbation()
+        self._update_perturb_visual()
+        self._dirty = True
 
       elif event.phase == "update":
-        if self._drag_body_id != event.body_id:
+        if (
+          self._pert.active == 0
+          or self._pert.select != body_id
+          or self._drag_start_world is None
+          or self._drag_init_xpos is None
+          or self._drag_init_xquat is None
+        ):
           return
         end_w = np.array(event.end_position, dtype=np.float64)
-        self._drag_target_world = end_w
+        self._drag_end_world = end_w
+        drag_vec = end_w - self._drag_start_world
 
-        if self._drag_mocap_id is not None:
-          mid = self._drag_mocap_id
-          if self._drag_mode == "translate" and self._drag_mocap_offset is not None:
-            self.data.mocap_pos[mid] = end_w + self._drag_mocap_offset
-          elif (
-            self._drag_mode == "rotate"
-            and self._drag_start_world is not None
-            and self._drag_mocap_init_quat is not None
-          ):
-            drag_vec = end_w - self._drag_start_world
-            r_delta = vtf.SO3.exp(self.perturbation_torque_scale * drag_vec)
-            r_init = vtf.SO3(wxyz=self._drag_mocap_init_quat)
-            self.data.mocap_quat[mid] = np.asarray((r_delta @ r_init).wxyz)
-
-          if self._paused:
-            mujoco.mj_forward(self.model, self.data)
-            self._render()
-          else:
-            self._dirty = True
+        if self._pert.active & int(mujoco.mjtPertBit.mjPERT_ROTATE):
+          self._pert.refpos[:] = self._drag_init_xpos
+          self._pert.refselpos[:] = self._drag_start_world
+          r_delta = vtf.SO3.exp(self.perturbation_torque_scale * drag_vec)
+          r_init = vtf.SO3(wxyz=self._drag_init_xquat)
+          self._pert.refquat[:] = np.asarray((r_delta @ r_init).wxyz)
         else:
-          self._apply_drag_perturbation()
-          self._update_perturb_visual()
-          self._dirty = True
+          self._pert.refpos[:] = self._drag_init_xpos + drag_vec
+          self._pert.refselpos[:] = end_w
+
+        self._apply_drag_perturbation()
+        self._update_perturb_visual()
+        self._dirty = True
 
       elif event.phase == "end":
         self._clear_drag_state()
         self._dirty = True
 
   def _apply_drag_perturbation(self) -> None:
-    """Compute and write active drag force/torque to ``data.xfrc_applied``."""
-    body_id = self._drag_body_id
-    if (
-      body_id is None
-      or self._drag_mocap_id is not None
-      or self._drag_grab_local is None
-      or self._drag_target_world is None
-    ):
+    """Apply active ``MjvPerturb`` pose and force to ``self.data``."""
+    if self._pert.active == 0 or self._pert.select <= 0:
       return
-
-    xpos = self.data.xpos[body_id]
-    xmat = self.data.xmat[body_id].reshape(3, 3)
-    grab_world = xpos + xmat @ self._drag_grab_local
-    com = self.data.xipos[body_id]
-    lever = grab_world - com
-
-    if self._drag_mode == "translate":
-      force = self.perturbation_stiffness * (self._drag_target_world - grab_world)
-      torque = np.cross(lever, force)
-    elif self._drag_mode == "rotate" and self._drag_start_world is not None:
-      force = self.perturbation_stiffness * (self._drag_start_world - grab_world)
-      drag_vec = self._drag_target_world - self._drag_start_world
-      ext_torque = self.perturbation_torque_scale * drag_vec
-      torque = np.cross(lever, force) + ext_torque
+    body_id = int(self._pert.select)
+    self._pert.localmass = float(self.model.body_subtreemass[body_id]) * (
+      self.perturbation_stiffness / 100.0
+    )
+    mujoco.mjv_applyPerturbPose(self.model, self.data, self._pert, int(self._paused))
+    if not self._paused:
+      mujoco.mjv_applyPerturbForce(self.model, self.data, self._pert)
     else:
-      return
-
-    self.data.xfrc_applied[body_id, :3] = force
-    self.data.xfrc_applied[body_id, 3:] = torque
+      mujoco.mj_forward(self.model, self.data)
 
   def _update_perturb_visual(self) -> None:
     """Update or hide the 3D perturbation indicator line."""
-    body_id = self._drag_body_id
+    body_id = int(self._pert.select)
+    active = int(self._pert.active)
+    start_world = self._drag_start_world
+    end_world = self._drag_end_world
+    localpos = np.array(self._pert.localpos, dtype=np.float64)
+
     if (
-      body_id is None
-      or self._drag_mocap_id is not None
-      or self._drag_grab_local is None
-      or self._drag_target_world is None
+      active == 0
+      or body_id <= 0
+      or self.model.body_mocapid[body_id] >= 0
+      or start_world is None
+      or end_world is None
     ):
       if self._perturb_line_handle is not None:
         self._perturb_line_handle.visible = False
@@ -375,19 +376,17 @@ class Viewer:
 
     xpos = self.data.xpos[body_id]
     xmat = self.data.xmat[body_id].reshape(3, 3)
-    grab_world = xpos + xmat @ self._drag_grab_local
+    grab_world = xpos + xmat @ localpos
 
-    if self._drag_mode == "rotate" and self._drag_start_world is not None:
-      p_start = self._drag_start_world
+    if active & int(mujoco.mjtPertBit.mjPERT_ROTATE):
+      p_start = start_world
       color = _ROTATE_LINE_COLOR
     else:
       p_start = grab_world
       color = _TRANSLATE_LINE_COLOR
 
     offset = self.scene.scene_offset
-    points = np.array(
-      [[p_start + offset, self._drag_target_world + offset]], dtype=np.float32
-    )
+    points = np.array([[p_start + offset, end_world + offset]], dtype=np.float32)
     colors = np.full((1, 2, 3), color, dtype=np.uint8)
 
     if self._perturb_line_handle is None:
@@ -405,16 +404,14 @@ class Viewer:
 
   def _clear_drag_state(self) -> None:
     """Clear active drag perturbation state and zero applied forces."""
-    if self._drag_body_id is not None and self._drag_mocap_id is None:
-      self.data.xfrc_applied[self._drag_body_id] = 0.0
-    self._drag_body_id = None
-    self._drag_mocap_id = None
-    self._drag_mode = None
-    self._drag_grab_local = None
-    self._drag_target_world = None
+    if self._pert.select > 0 and self.model.body_mocapid[self._pert.select] < 0:
+      self.data.xfrc_applied[self._pert.select] = 0.0
+    self._pert.active = 0
+    self._pert.select = 0
     self._drag_start_world = None
-    self._drag_mocap_offset = None
-    self._drag_mocap_init_quat = None
+    self._drag_end_world = None
+    self._drag_init_xpos = None
+    self._drag_init_xquat = None
     if self._perturb_line_handle is not None:
       self._perturb_line_handle.visible = False
 

@@ -482,15 +482,82 @@ def test_body_drag_callback_registration_and_dispatch():
   assert ev.start_position == (1.0, 2.0, 3.0)
   assert ev.end_position == (1.5, 2.5, 3.5)
 
-  # Test rebuild_visual_handles preserves drag callbacks.
+  # Test show_only_selected routes instance_index to the selected _last_env_idx.
+  received.clear()
+  scene.show_only_selected = True
+  scene._last_env_idx = 1
+  fake_event_slice = viser.SceneNodeDragEvent(
+    client=None,  # type: ignore[arg-type]
+    client_id=0,
+    target=box_mg.handle,
+    phase="start",
+    instance_index=0,  # body_idx 0 (box_a) in selected env 1
+    start_position=(0.0, 0.0, 1.0),
+    start_screen_pos=(0.5, 0.5),
+    end_position=(0.0, 0.0, 1.0),
+    end_screen_pos=(0.5, 0.5),
+    button="left",
+    modifier="cmd/ctrl",
+  )
+  asyncio.run(handler(fake_event_slice))
+  assert len(received) == 1
+  assert received[0].body_name == "box_a"
+  assert received[0].env_idx == 1
+
+  # Test selective remove_body_drag_callback preserves other callbacks.
+  other_received: list[BodyDragEvent] = []
+  scene.add_body_drag_callback(other_received.append, button="left", modifier="alt")
+  scene.remove_body_drag_callback(_on_drag)
+  for mg in scene._mesh_groups:
+    assert mg.handle._has_any_drag_callbacks()
+
+  # Test rebuild_visual_handles preserves remaining drag callbacks.
   scene.rebuild_visual_handles()
   for mg in scene._mesh_groups:
     assert mg.handle._has_any_drag_callbacks()
 
-  # Test remove_body_drag_callbacks clears callbacks.
+  # Test remove_body_drag_callbacks clears all callbacks.
   scene.remove_body_drag_callbacks()
   for mg in scene._mesh_groups:
     assert not mg.handle._has_any_drag_callbacks()
+
+  try:
+    server.stop()
+  except RuntimeError:
+    pass
+
+
+def test_convex_hull_drag_callback_dispatch():
+  server = viser.ViserServer(port=0)
+  model = mujoco.MjModel.from_xml_string(_MESH_BODY_XML)
+  scene = ViserMujocoScene(server, model, num_envs=2)
+
+  received: list[BodyDragEvent] = []
+  scene.add_body_drag_callback(received.append)
+
+  assert len(scene._hull_dynamic_handles) == 1
+  hull_handle, body_id = scene._hull_dynamic_handles[0]
+  assert hull_handle._has_any_drag_callbacks()
+
+  handler = scene._make_hull_drag_handler(body_id, received.append)
+  fake_event = viser.SceneNodeDragEvent(
+    client=None,  # type: ignore[arg-type]
+    client_id=0,
+    target=hull_handle,
+    phase="start",
+    instance_index=1,
+    start_position=(0.0, 0.0, 1.0),
+    start_screen_pos=(0.5, 0.5),
+    end_position=(0.5, 0.0, 1.0),
+    end_screen_pos=(0.6, 0.5),
+    button="left",
+    modifier="cmd/ctrl",
+  )
+  asyncio.run(handler(fake_event))
+  assert len(received) == 1
+  assert received[0].body_id == body_id
+  assert received[0].body_name == "mesh_body"
+  assert received[0].env_idx == 1
 
   try:
     server.stop()

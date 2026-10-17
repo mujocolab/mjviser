@@ -99,8 +99,8 @@ def test_viewer_translate_drag_applies_force_and_torque(viewer: Viewer) -> None:
 
 def test_viewer_rotate_drag_applies_pin_and_torque(viewer: Viewer) -> None:
   box_id = mujoco.mj_name2id(viewer.model, mujoco.mjtObj.mjOBJ_BODY, "box")
-  viewer.perturbation_stiffness = 80.0
-  viewer.perturbation_torque_scale = 5.0
+  viewer.perturbation_stiffness = 100.0
+  viewer.perturbation_torque_scale = 0.5
 
   start_ev = _make_event(
     "start",
@@ -117,13 +117,52 @@ def test_viewer_rotate_drag_applies_pin_and_torque(viewer: Viewer) -> None:
     box_id,
     "box",
     (0.0, 0.0, 1.0),
-    (0.0, 0.0, 3.0),
+    (0.0, 0.0, 2.0),
     modifier="cmd/ctrl+shift",
   )
   viewer._on_body_drag(update_ev)
 
+  # Unit cube (half-size 0.5, mass 1.0) has inertia 1/6; mjv_applyPerturbForce
+  # applies 250 * I * 0.5 = 41.6667 N*m around +Z while pinning linear force at 0.
   np.testing.assert_allclose(viewer.data.xfrc_applied[box_id, :3], [0.0, 0.0, 0.0])
-  np.testing.assert_allclose(viewer.data.xfrc_applied[box_id, 3:], [0.0, 0.0, 10.0])
+  np.testing.assert_allclose(
+    viewer.data.xfrc_applied[box_id, 3:], [0.0, 0.0, 250.0 / 6.0], rtol=1e-4
+  )
+
+
+def test_viewer_damping_and_reset_mid_drag(viewer: Viewer) -> None:
+  box_id = mujoco.mj_name2id(viewer.model, mujoco.mjtObj.mjOBJ_BODY, "box")
+  viewer.perturbation_stiffness = 100.0
+
+  # Give the box +1 m/s velocity along Y; mjv_applyPerturbForce damps the 100 N pull to 90 N.
+  viewer.data.qvel[1] = 1.0
+  mujoco.mj_forward(viewer.model, viewer.data)
+
+  viewer._on_body_drag(
+    _make_event("start", box_id, "box", (0.0, 0.0, 1.0), (0.0, 0.0, 1.0))
+  )
+  viewer._on_body_drag(
+    _make_event("update", box_id, "box", (0.0, 0.0, 1.0), (0.0, 1.0, 1.0))
+  )
+  np.testing.assert_allclose(viewer.data.xfrc_applied[box_id, :3], [0.0, 90.0, 0.0])
+
+  # Reset mid-drag clears xfrc_applied and active perturbation state.
+  viewer._reset()
+  assert viewer._drag_body_id is None
+  np.testing.assert_allclose(viewer.data.xfrc_applied[box_id], np.zeros(6))
+
+
+def test_viewer_paused_free_body_drag_updates_qpos(viewer: Viewer) -> None:
+  box_id = mujoco.mj_name2id(viewer.model, mujoco.mjtObj.mjOBJ_BODY, "box")
+  viewer._paused = True
+
+  viewer._on_body_drag(
+    _make_event("start", box_id, "box", (0.0, 0.0, 1.0), (0.0, 0.0, 1.0))
+  )
+  viewer._on_body_drag(
+    _make_event("update", box_id, "box", (0.0, 0.0, 1.0), (1.0, 2.0, 3.0))
+  )
+  np.testing.assert_allclose(viewer.data.qpos[:3], [1.0, 2.0, 3.0])
 
 
 def test_viewer_mocap_body_drag_updates_mocap_pos_and_quat(viewer: Viewer) -> None:
