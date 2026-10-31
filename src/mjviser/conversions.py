@@ -584,7 +584,10 @@ def merge_geoms(mj_model: mujoco.MjModel, geom_ids: list[int]) -> trimesh.Trimes
   for geom_id in geom_ids:
     # int() cast: geom_type is a numpy scalar, and `np_scalar in (enum, ...)`
     # evaluates `enum == np_scalar`, which is False for pybind11 enums.
-    if int(mj_model.geom_type[geom_id]) in (int(mjtGeom.mjGEOM_MESH), int(mjtGeom.mjGEOM_SDF)):
+    if int(mj_model.geom_type[geom_id]) in (
+      int(mjtGeom.mjGEOM_MESH),
+      int(mjtGeom.mjGEOM_SDF),
+    ):
       meshes.append(mujoco_mesh_to_trimesh(mj_model, geom_id))
     else:
       meshes.append(create_primitive_mesh(mj_model, geom_id))
