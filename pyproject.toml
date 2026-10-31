@@ -17,7 +17,6 @@ classifiers = [
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -27,7 +26,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Visualization",
 ]
 description = "Web-based MuJoCo viewer powered by viser."
-requires-python = ">=3.10,<3.15"
+requires-python = ">=3.11,<3.15"
 dependencies = [
   "mujoco>=3.6.0",
   "numpy",
@@ -76,7 +75,7 @@ select = ["E4", "E7", "E9", "F", "I", "B"]
 ignore = ["B011"]
 
 [tool.pyright]
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 ignore = ["./typings", "./examples"]
 stubPath = "typings"
 
