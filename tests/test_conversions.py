@@ -315,6 +315,15 @@ def test_merge_geoms(simple_model):
   assert len(mesh.vertices) > 0
 
 
+def test_merge_geoms_with_mesh_geom(cubemap_model):
+  # Regression: geom_type is a numpy scalar, and the enum membership test in
+  # merge_geoms silently evaluated False for mesh geoms, raising
+  # "ValueError: Unsupported shape type: 7".
+  mesh = merge_geoms(cubemap_model, [0])
+  assert isinstance(mesh, trimesh.Trimesh)
+  assert len(mesh.vertices) > 0
+
+
 def test_group_geoms_by_visual_compat_splits_textured_hfield():
   xml = """
 <mujoco>
