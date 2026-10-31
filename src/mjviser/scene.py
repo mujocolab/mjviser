@@ -49,6 +49,22 @@ _FRAME_MODES: dict[str, int] = {
   "Site": int(mujoco.mjtFrame.mjFRAME_SITE),
 }
 
+# Visualization flag commands: (label, hotkey, flag). Hotkeys match MuJoCo's
+# simulate. None means MuJoCo's key is one viser reserves for camera movement
+# (W/A/S/D/Q/E), so the command is only reachable from the command palette.
+_VIS_FLAG_COMMANDS: list[tuple[str, str | None, int]] = [
+  ("Contact Point", "C", int(mujoco.mjtVisFlag.mjVIS_CONTACTPOINT)),
+  ("Contact Force", "F", int(mujoco.mjtVisFlag.mjVIS_CONTACTFORCE)),
+  ("Contact Split", "P", int(mujoco.mjtVisFlag.mjVIS_CONTACTSPLIT)),
+  ("Joint", "J", int(mujoco.mjtVisFlag.mjVIS_JOINT)),
+  ("Inertia", "I", int(mujoco.mjtVisFlag.mjVIS_INERTIA)),
+  ("Tendon", "V", int(mujoco.mjtVisFlag.mjVIS_TENDON)),
+  ("Center of Mass", "M", int(mujoco.mjtVisFlag.mjVIS_COM)),
+  ("Actuator", "U", int(mujoco.mjtVisFlag.mjVIS_ACTUATOR)),
+  ("Equality", None, int(mujoco.mjtVisFlag.mjVIS_CONSTRAINT)),  # MuJoCo: E
+  ("Auto Connect", None, int(mujoco.mjtVisFlag.mjVIS_AUTOCONNECT)),  # MuJoCo: A
+]
+
 # Geom type constants (avoid repeated int() casts).
 _CYLINDER = int(mjtGeom.mjGEOM_CYLINDER)
 _CAPSULE = int(mjtGeom.mjGEOM_CAPSULE)
@@ -149,7 +165,7 @@ class ViserMujocoScene:
 
     # Visualization settings.
     self.env_idx = 0
-    self.camera_tracking_enabled = True
+    self.camera_tracking_enabled = False
     self.show_only_selected = False
     self.geom_groups_visible = [True, True, True, False, False, False]
     self.site_groups_visible = [True, True, True, False, False, False]
@@ -182,6 +198,12 @@ class ViserMujocoScene:
 
     self.needs_update = False
     self.paused = False
+    self._vis_flag_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
+    self._simple_flag_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
+    self._geom_group_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
+    self._site_group_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
+    self._camera_dropdown: viser.GuiDropdownHandle[str] | None = None
+    self._camera_tracking_cb: viser.GuiCheckboxHandle | None = None
 
     # Cached visualization state for re-rendering when settings change.
     self._tracked_body_id: int | None = None
@@ -431,15 +453,27 @@ class ViserMujocoScene:
         initial_value=self.camera_tracking_enabled,
         hint="Keep tracked body centered.",
       )
+      self._camera_tracking_cb = cb_camera_tracking
 
       @cb_camera_tracking.on_update
       def _(_) -> None:
         def _mutate() -> None:
           self.camera_tracking_enabled = cb_camera_tracking.value
           if self.camera_tracking_enabled:
+            if self._camera_dropdown is not None:
+              self._camera_dropdown.value = "Free"
             for client in self.server.get_clients().values():
               client.camera.position = _camera_offset
               client.camera.look_at = np.zeros(3)
+          else:
+            # Untrack without teleporting: the scene offset is about to drop
+            # to zero (bodies snap back to world coords), so shift the camera
+            # by the same amount to keep the view exactly where it is now.
+            # viser's position setter translates look_at along with the camera,
+            # so setting position alone preserves the orientation.
+            delta = -self._scene_offset
+            for client in self.server.get_clients().values():
+              client.camera.position = np.asarray(client.camera.position) + delta
 
         self._apply_visualization_change(_mutate)
 
@@ -457,11 +491,27 @@ class ViserMujocoScene:
         for client in self.server.get_clients().values():
           client.camera.fov = np.radians(slider_fov.value)
 
+      if self.mj_model.ncam > 0:
+        cam_names = ["Free"]
+        for i in range(self.mj_model.ncam):
+          name = mj_id2name(self.mj_model, mjtObj.mjOBJ_CAMERA, i)
+          cam_names.append(name or f"camera_{i}")
+        self._camera_dropdown = self.server.gui.add_dropdown(
+          "Camera",
+          options=cam_names,
+          initial_value="Free",
+        )
+
+        @self._camera_dropdown.on_update
+        def _(_) -> None:
+          self._apply_camera_selection()
+
       @self.server.on_client_connect
       def _(client: viser.ClientHandle) -> None:
         client.camera.fov = np.radians(slider_fov.value)
-        client.camera.position = _camera_offset
-        client.camera.look_at = np.zeros(3) if self.camera_tracking_enabled else _center
+        target = np.zeros(3) if self.camera_tracking_enabled else _center
+        client.camera.position = target + _camera_offset
+        client.camera.look_at = target
 
   def create_overlay_gui(self) -> None:
     """Add overlay visualization controls into the current GUI context.
@@ -479,6 +529,7 @@ class ViserMujocoScene:
       """Add a vis-flag checkbox at the current GUI level."""
       _opt.flags[flag_idx] = int(initial)
       cb = self.server.gui.add_checkbox("Enabled", initial_value=initial)
+      self._vis_flag_checkboxes[flag_idx] = cb
 
       @cb.on_update
       def _(event, _idx=flag_idx) -> None:
@@ -572,6 +623,7 @@ class ViserMujocoScene:
       cb_split = self.server.gui.add_checkbox(
         "Split normal/friction", initial_value=False
       )
+      self._vis_flag_checkboxes[int(mujoco.mjtVisFlag.mjVIS_CONTACTSPLIT)] = cb_split
 
       @cb_split.on_update
       def _(event) -> None:
@@ -695,6 +747,7 @@ class ViserMujocoScene:
 
     for label, flag_idx, initial in _simple_flags:
       cb = self.server.gui.add_checkbox(label, initial_value=initial)
+      self._simple_flag_checkboxes[flag_idx] = cb
 
       @cb.on_update
       def _(event, _idx=flag_idx) -> None:
@@ -723,6 +776,7 @@ class ViserMujocoScene:
           initial_value=self.geom_groups_visible[i],
           hint=f"Show/hide geometry in group {i}",
         )
+        self._geom_group_checkboxes[i] = cb
 
         @cb.on_update
         def _(event, group_idx=i) -> None:
@@ -739,6 +793,7 @@ class ViserMujocoScene:
           initial_value=self.site_groups_visible[i],
           hint=f"Show/hide sites in group {i}",
         )
+        self._site_group_checkboxes[i] = cb
 
         @cb.on_update
         def _(event, group_idx=i) -> None:
@@ -797,6 +852,90 @@ class ViserMujocoScene:
     with tabs.add_tab("Groups", icon=viser.Icon.LAYERS_INTERSECT):
       self.create_groups_gui()
     return tabs
+
+  def _apply_camera_selection(self) -> None:
+    """Snap the view to the selected MuJoCo camera. "Free" leaves it as is."""
+    if self._camera_dropdown is None or self._camera_dropdown.value == "Free":
+      return
+    # MuJoCo cameras live in world coordinates, so stop tracking first.
+    if self._camera_tracking_cb is not None:
+      self._camera_tracking_cb.value = False
+    idx = self._camera_dropdown.options.index(self._camera_dropdown.value) - 1
+    data = self._last_mj_data
+    if data is None:
+      data = self.mj_data
+      mujoco.mj_forward(self.mj_model, data)
+    pos = data.cam_xpos[idx].copy()
+    look_at = pos - data.cam_xmat[idx].reshape(3, 3)[:, 2]
+    for client in self.server.get_clients().values():
+      client.camera.position = pos
+      client.camera.look_at = look_at
+
+  def _toggle_vis_flag(self, flag_idx: int) -> None:
+    """Toggle a visualization flag and sync the corresponding checkbox."""
+    new_val = not bool(self._mjv_option.flags[flag_idx])
+
+    def _mutate() -> None:
+      self._mjv_option.flags[flag_idx] = int(new_val)
+
+    cb = self._vis_flag_checkboxes.get(flag_idx) or self._simple_flag_checkboxes.get(
+      flag_idx
+    )
+    if cb is not None:
+      cb.value = new_val
+    else:
+      self._apply_visualization_change(_mutate)
+
+  def register_keybindings(self) -> None:
+    """Register single-letter keyboard shortcuts for visualization toggles."""
+    server = self.server
+    for label, key, flag_idx in _VIS_FLAG_COMMANDS:
+      cmd = server.gui.add_command(f"Toggle {label}", hotkey=key)  # type: ignore[arg-type]
+      cmd.on_trigger(lambda _, _idx=flag_idx: self._toggle_vis_flag(_idx))
+
+    for i in range(6):
+      cmd = server.gui.add_command(f"Toggle Geom Group {i}", hotkey=str(i))  # type: ignore[arg-type]
+      cmd.on_trigger(
+        lambda _, _idx=i: self._toggle_group(self._geom_group_checkboxes, _idx)
+      )
+      # MuJoCo uses shift+digit, which viser can't match (it sees "!", not "1").
+      cmd = server.gui.add_command(f"Toggle Site Group {i}")
+      cmd.on_trigger(
+        lambda _, _idx=i: self._toggle_group(self._site_group_checkboxes, _idx)
+      )
+
+    dropdown = self._camera_dropdown
+    if dropdown is not None:
+      cmd = server.gui.add_command("Free Camera", hotkey="escape")
+      cmd.on_trigger(lambda _: setattr(dropdown, "value", "Free"))
+      # MuJoCo uses ] and [, which viser hotkeys don't support yet.
+      cmd = server.gui.add_command("Next Camera")
+      cmd.on_trigger(lambda _: self._cycle_camera(1))
+      cmd = server.gui.add_command("Previous Camera")
+      cmd.on_trigger(lambda _: self._cycle_camera(-1))
+
+  def _cycle_camera(self, step: int) -> None:
+    """Move the camera dropdown to the next/previous MuJoCo camera."""
+    if self._camera_dropdown is None:
+      return
+    # Options are ["Free", cam0, cam1, ...]. Like simulate, cycling only visits
+    # MuJoCo cameras and wraps around.
+    options = list(self._camera_dropdown.options)
+    ncam = len(options) - 1
+    idx = options.index(self._camera_dropdown.value)
+    if idx == 0:
+      idx = 1 if step > 0 else ncam
+    else:
+      idx = (idx - 1 + step) % ncam + 1
+    self._camera_dropdown.value = options[idx]
+
+  def _toggle_group(
+    self, checkboxes: dict[int, viser.GuiCheckboxHandle], group_idx: int
+  ) -> None:
+    """Flip a geom/site group checkbox; its on_update applies the change."""
+    cb = checkboxes.get(group_idx)
+    if cb is not None:
+      cb.value = not cb.value
 
   def update_from_arrays(
     self,
