@@ -136,3 +136,11 @@ def scene(simple_model):
   s = ViserMujocoScene(server, simple_model, num_envs=1)
   yield s
   _stop_server(server)
+
+
+@pytest.fixture
+def humanoid_scene(humanoid_model):
+  server = viser.ViserServer(port=0)
+  s = ViserMujocoScene(server, humanoid_model, num_envs=1)
+  yield s
+  _stop_server(server)
