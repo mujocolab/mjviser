@@ -10,6 +10,7 @@ from threading import RLock
 import mujoco
 import numpy as np
 import trimesh
+import trimesh.visual
 import viser
 import viser.transforms as vtf
 from mujoco import mj_id2name, mjtGeom, mjtObj
@@ -22,6 +23,7 @@ from .conversions import (
   merge_geoms_hull,
   merge_sites,
 )
+from .interaction import Perturbation
 
 
 @dataclasses.dataclass
@@ -76,10 +78,16 @@ _ARROW1 = int(mjtGeom.mjGEOM_ARROW1)
 _ARROW2 = int(mjtGeom.mjGEOM_ARROW2)
 _ARROWS = (_ARROW, _ARROW1, _ARROW2)
 _ARROW_HEAD = -1  # Synthetic geom type for arrow cone heads.
+_LINEBOX = int(mjtGeom.mjGEOM_LINEBOX)
 
 _CAT_DECOR = int(mujoco.mjtCatBit.mjCAT_DECOR)
 _OBJ_TENDON = int(mujoco.mjtObj.mjOBJ_TENDON)
 _OBJ_JOINT = int(mujoco.mjtObj.mjOBJ_JOINT)
+_VIS_PERTOBJ = int(mujoco.mjtVisFlag.mjVIS_PERTOBJ)
+_PERT_ROTATE = int(mujoco.mjtPertBit.mjPERT_ROTATE)
+
+# The selected body is drawn with each color moved this far toward white.
+_HIGHLIGHT_WHITEN = 0.5
 
 # Cached unit meshes for decor rendering, keyed by mjtGeom int value.
 _UNIT_MESHES: dict[int, trimesh.Trimesh] = {}
@@ -92,7 +100,7 @@ def _get_unit_mesh(geom_type: int) -> trimesh.Trimesh:
       _UNIT_MESHES[geom_type] = trimesh.creation.cylinder(radius=1.0, height=1.0)
     elif geom_type == _CAPSULE:
       _UNIT_MESHES[geom_type] = trimesh.creation.capsule(radius=1.0, height=1.0)
-    elif geom_type == _BOX:
+    elif geom_type in (_BOX, _LINEBOX):
       _UNIT_MESHES[geom_type] = trimesh.creation.box(extents=[2.0, 2.0, 2.0])
     elif geom_type in (_ELLIPSOID, _SPHERE):
       _UNIT_MESHES[geom_type] = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
@@ -108,6 +116,15 @@ def _get_unit_mesh(geom_type: int) -> trimesh.Trimesh:
     else:
       _UNIT_MESHES[geom_type] = trimesh.creation.icosphere(subdivisions=1, radius=1.0)
   return _UNIT_MESHES[geom_type]
+
+
+def _vertex_colors(mesh: trimesh.Trimesh) -> np.ndarray:
+  """Per-vertex RGBA of a mesh, sampled from its texture if it has one."""
+  visual = mesh.visual
+  if isinstance(visual, trimesh.visual.TextureVisuals):
+    visual = visual.to_color()
+  assert isinstance(visual, trimesh.visual.ColorVisuals)
+  return np.asarray(visual.vertex_colors)
 
 
 class ViserMujocoScene:
@@ -204,6 +221,9 @@ class ViserMujocoScene:
     self._site_group_checkboxes: dict[int, viser.GuiCheckboxHandle] = {}
     self._camera_dropdown: viser.GuiDropdownHandle[str] | None = None
     self._camera_tracking_cb: viser.GuiCheckboxHandle | None = None
+    self.perturbation: Perturbation | None = None  # See enable_perturbation().
+    self._highlight: viser.GlbHandle | None = None
+    self._highlight_key: tuple[object, ...] = ()
 
     # Cached visualization state for re-rendering when settings change.
     self._tracked_body_id: int | None = None
@@ -221,6 +241,7 @@ class ViserMujocoScene:
     mujoco.mj_kinematics(mj_model, self.mj_data)
     self._add_fixed_geometry()
     self._create_mesh_handles_by_group()
+    self._register_perturbation_handlers()
     self._add_fixed_sites()
     self._create_site_handles_by_group()
     self._compute_hull_body_meshes()
@@ -287,6 +308,23 @@ class ViserMujocoScene:
         handle.visible = value
       self._sync_visibilities()
 
+  def enable_perturbation(self) -> Perturbation:
+    """Let users select bodies and drag them with the mouse.
+
+    The caller owns the MjData and must call ``perturbation.step`` before
+    each physics step (and each frame while paused).
+    """
+    if self.perturbation is None:
+      self.perturbation = Perturbation(self.server, self.mj_model)
+      self._register_perturbation_handlers()
+    return self.perturbation
+
+  def _register_perturbation_handlers(self) -> None:
+    """Make every body mesh draggable."""
+    if self.perturbation is not None:
+      for mg in self._mesh_groups:
+        self.perturbation.attach(mg.handle)
+
   def set_refresh_handler(self, handler: Callable[[], None] | None) -> None:
     """Install a callback used to refresh cached visualization state."""
     with self._update_lock:
@@ -295,6 +333,10 @@ class ViserMujocoScene:
   def rebuild_visual_handles(self) -> None:
     """Rebuild handles whose geometry or appearance is baked at creation time."""
     with self._update_lock:
+      # Body ids may not survive a rebuild, so drop selection and drag state.
+      if self.perturbation is not None:
+        self.perturbation.clear()
+
       for group in self._mesh_groups:
         group.handle.remove()
       self._mesh_groups.clear()
@@ -318,6 +360,7 @@ class ViserMujocoScene:
       mujoco.mj_kinematics(self.mj_model, self.mj_data)
       self._add_fixed_geometry()
       self._create_mesh_handles_by_group()
+      self._register_perturbation_handlers()
       self._add_fixed_sites()
       self._create_site_handles_by_group()
       self._compute_hull_body_meshes()
@@ -352,7 +395,8 @@ class ViserMujocoScene:
     """Return True if any overlay visualization is enabled."""
     if self.frame_mode != "None":
       return True
-    return any(self._mjv_option.flags[i] for i in range(len(self._mjv_option.flags)))
+    flags = self._mjv_option.flags
+    return any(flags[i] for i in range(len(flags)) if i != _VIS_PERTOBJ)
 
   def _sync_visibilities(self) -> None:
     """Synchronize all handle visibilities based on current flags."""
@@ -1078,6 +1122,10 @@ class ViserMujocoScene:
     if mj_data is not None:
       self._last_mj_data = mj_data
 
+    if self.perturbation is not None:
+      self.perturbation.offset = scene_offset
+      self.perturbation.geomgroup = np.array(self.geom_groups_visible, np.uint8)
+
     self.fixed_bodies_frame.position = scene_offset
     slice_single = self.show_only_selected and self.num_envs > 1
     with self.server.atomic():
@@ -1115,12 +1163,69 @@ class ViserMujocoScene:
           handle.batched_positions = pos
           handle.batched_wxyzs = quat
 
-      if self._any_decor_visible() and mj_data is not None:
+      self._update_highlight(body_xpos, body_xquat, env_idx, scene_offset, slice_single)
+
+      perturbing = self.perturbation is not None and self.perturbation.pert.active
+      show_decor = self._any_decor_visible() or perturbing
+      if show_decor and mj_data is not None:
         self._update_decor_from_mjvscene(mj_data, scene_offset)
-      elif not self._any_decor_visible():
+      elif not show_decor:
         self._clear_decor_handles()
 
       self.server.flush()
+
+  def _update_highlight(
+    self,
+    body_xpos: np.ndarray,
+    body_xquat: np.ndarray,
+    env_idx: int,
+    scene_offset: np.ndarray,
+    slice_single: bool,
+  ) -> None:
+    """Brighten the selected body, like MuJoCo's selection glow."""
+    body = self.perturbation.pert.select if self.perturbation is not None else 0
+    if is_fixed_body(self.mj_model, body):
+      body = 0  # Fixed bodies aren't in the mesh groups, so can't be swapped.
+    key = (body, env_idx, slice_single, tuple(self.geom_groups_visible))
+    if key != self._highlight_key:
+      self._highlight_key = key
+      self._rebuild_highlight(body, env_idx, slice_single)
+    if self._highlight is not None:
+      self._highlight.position = body_xpos[env_idx, body] + scene_offset
+      self._highlight.wxyz = body_xquat[env_idx, body]
+
+  def _rebuild_highlight(self, body: int, env_idx: int, slice_single: bool) -> None:
+    """Swap the body's instances for a brightened copy (no overlap to z-fight)."""
+    if self._highlight is not None:
+      self._highlight.remove()
+      self._highlight = None
+
+    for mg in self._mesh_groups:
+      n_envs = 1 if slice_single else self.num_envs
+      scales = np.ones((n_envs, len(mg.body_ids)), dtype=np.float32)
+      scales[0 if slice_single else env_idx, mg.body_ids == body] = 0.0
+      mg.handle.batched_scales = scales.reshape(-1)
+
+    geom_ids = [
+      g
+      for g in range(self.mj_model.ngeom)
+      if self.mj_model.geom_bodyid[g] == body
+      and self.mj_model.geom_rgba[g, 3] > 0
+      and self.mj_model.geom_group[g] < 6
+      and self.geom_groups_visible[self.mj_model.geom_group[g]]
+    ]
+    if body == 0 or not geom_ids:
+      return
+    mesh = merge_geoms(self.mj_model, geom_ids)
+    colors = _vertex_colors(mesh).astype(float)
+    colors[:, :3] += _HIGHLIGHT_WHITEN * (255 - colors[:, :3])
+    mesh.visual = trimesh.visual.ColorVisuals(
+      mesh, vertex_colors=colors.astype(np.uint8)
+    )
+    self._highlight = self.server.scene.add_mesh_trimesh("/selection", mesh)
+    # The copy stands in for the body, so it must be draggable too.
+    if self.perturbation is not None:
+      self.perturbation.attach(self._highlight)
 
   def _batched_transform(
     self,
@@ -1482,11 +1587,17 @@ class ViserMujocoScene:
     Calls ``mjv_updateScene`` to generate decorative geoms (contacts,
     tendons, frames, inertia) and renders them as batched viser meshes.
     """
+    # Draw MuJoCo's rotation target, but not its translation connector: viser
+    # already draws an arrow for every drag, and two arrows look broken.
+    # TODO: draw the connector once viser can hide its drag arrow.
+    pert = self.perturbation.pert if self.perturbation is not None else None
+    rotating = pert is not None and bool(pert.active & _PERT_ROTATE)
+    self._mjv_option.flags[_VIS_PERTOBJ] = int(rotating)
     mujoco.mjv_updateScene(
       self.mj_model,
       mj_data,
       self._mjv_option,
-      None,
+      pert,
       self._mjv_camera,
       int(mujoco.mjtCatBit.mjCAT_ALL),
       self._mjv_scene,
@@ -1543,6 +1654,7 @@ class ViserMujocoScene:
         batched_colors=colors,
         batched_opacities=batched_opacities,
         lod="off",
+        wireframe=mesh_type == _LINEBOX,
         cast_shadow=False,
         receive_shadow=False,
       )
