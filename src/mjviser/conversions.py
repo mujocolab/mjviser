@@ -504,7 +504,7 @@ def get_geom_texture_id(mj_model: mujoco.MjModel, geom_idx: int) -> int:
   if geom_type == mjtGeom.mjGEOM_BOX:
     return texid if _is_cubemap_texture(mj_model, texid) else -1
 
-  if geom_type not in (mjtGeom.mjGEOM_MESH, mjtGeom.mjGEOM_SDF):
+  if int(geom_type) not in (int(mjtGeom.mjGEOM_MESH), int(mjtGeom.mjGEOM_SDF)):
     return -1
 
   mesh_id = mj_model.geom_dataid[geom_idx]
