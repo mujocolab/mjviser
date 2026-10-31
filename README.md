@@ -74,6 +74,15 @@ while True:
   scene.update_from_mjdata(data)
 ```
 
+## Mouse and keyboard
+
+`Viewer` follows MuJoCo's simulate:
+
+- Click a body to select it, and click empty space to deselect. Cmd/Ctrl+click is more reliable, since it keeps the camera still.
+- Cmd/Ctrl + right-drag moves the selected body and Cmd/Ctrl + left-drag rotates it. Hold Shift for the horizontal plane; it can be toggled mid-drag.
+- While running, the body is pulled by a spring. While paused, it is posed directly.
+- Keyboard shortcuts match simulate where viser allows (Space, Backspace, C, F, J, 0-5, and more). Every command is listed in viser's command palette.
+
 ## Examples
 
 - `active_viewer.py`: simplest usage with playback controls
@@ -86,7 +95,3 @@ while True:
 ## Acknowledgments
 
 Thanks to [Matija Kecman](https://github.com/okmatija) for early feedback and suggestions.
-
-## Limitations
-
-- **No mouse interaction**: clicking/dragging bodies and keyboard callbacks require upstream Viser support.

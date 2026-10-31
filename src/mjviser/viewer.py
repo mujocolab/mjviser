@@ -76,6 +76,7 @@ class Viewer:
     self.scene = ViserMujocoScene(self._server, model, num_envs=num_envs)
     self._lock = Lock()
     self.scene.set_refresh_handler(self._refresh_scene_from_gui)
+    self._perturbation = self.scene.enable_perturbation()
 
     # Speed.
     self._speed_idx = _SPEEDS.index(1.0)
@@ -184,6 +185,11 @@ class Viewer:
       with self._lock:
         if self._step_physics(dt):
           self._dirty = True
+    else:
+      # Paused: selection and drags still apply; drags pose bodies directly.
+      with self._lock:
+        if self._perturbation.step(self.data, paused=True):
+          self._dirty = True
 
     # Render at fixed frame rate, but only when state changed.
     self._time_until_next_render -= dt
@@ -215,6 +221,7 @@ class Viewer:
     deadline = time.perf_counter() + _FRAME_TIME
     hit_deadline = False
     while self._budget >= step_dt:
+      self._perturbation.step(self.data, paused=False)
       self._step_fn(self.model, self.data)
       self._budget -= step_dt
       self._step_count += 1
@@ -284,6 +291,7 @@ class Viewer:
       self._reset()
       self._step_count = 0
       self._budget = 0.0
+      self._perturbation.clear()
       self._render()
       self._update_status_display()
     self._sync_sliders()
@@ -375,6 +383,8 @@ class Viewer:
           @key_dropdown.on_update
           def _(_) -> None:
             _load_keyframe()
+
+      self._perturbation.setup_gui()
 
       # Scene controls (camera, environment).
       with self._server.gui.add_folder("Scene"):
