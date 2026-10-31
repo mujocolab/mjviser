@@ -417,3 +417,22 @@ def test_format_speed():
   assert _format_speed(2.0) == "2x"
   assert _format_speed(4.0) == "4x"
   assert _format_speed(8.0) == "8x"
+
+
+def test_get_geom_texture_id_textured_mesh():
+  # Regression: a tuple-membership check on the numpy geom type was always
+  # False on newer MuJoCo, so textured meshes lost their texture.
+  model = mujoco.MjModel.from_xml_string("""
+    <mujoco>
+      <asset>
+        <texture name="checker" type="2d" builtin="checker" width="8" height="8"/>
+        <material name="tex" texture="checker"/>
+        <mesh name="tetra" vertex="0 0 0  1 0 0  0 1 0  0 0 1"
+              texcoord="0 0  1 0  0 1  1 1"/>
+      </asset>
+      <worldbody>
+        <geom type="mesh" mesh="tetra" material="tex"/>
+      </worldbody>
+    </mujoco>
+  """)
+  assert get_geom_texture_id(model, 0) >= 0
