@@ -123,19 +123,12 @@ def cubemap_model():
   return mujoco.MjModel.from_xml_string(_CUBEMAP_XML)
 
 
-def _stop_server(server: viser.ViserServer) -> None:
-  try:
-    server.stop()
-  except RuntimeError:
-    pass  # Event loop already closed (Python 3.10).
-
-
 @pytest.fixture
 def scene(simple_model):
   server = viser.ViserServer(port=0)
   s = ViserMujocoScene(server, simple_model, num_envs=1)
   yield s
-  _stop_server(server)
+  server.stop()
 
 
 @pytest.fixture
@@ -143,4 +136,4 @@ def humanoid_scene(humanoid_model):
   server = viser.ViserServer(port=0)
   s = ViserMujocoScene(server, humanoid_model, num_envs=1)
   yield s
-  _stop_server(server)
+  server.stop()
