@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "mjviser"
-version = "0.0.16"
+version = "0.0.17"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 readme = "README.md"
@@ -28,7 +28,7 @@ classifiers = [
 description = "Web-based MuJoCo viewer powered by viser."
 requires-python = ">=3.11,<3.15"
 dependencies = [
-  "mujoco>=3.6.0",
+  "mujoco-core>=4.0.1",
   "numpy",
   "trimesh>=4.8.3",
   "viser>=1.1.1",
