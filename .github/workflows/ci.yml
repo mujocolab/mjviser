@@ -17,12 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.12.1"
+          version: "0.13.7"
           enable-cache: true
-      - run: uvx ruff@0.16.1 check --diff
-      - run: uvx ruff@0.16.1 format --diff
+      - run: uvx ruff@0.17.4 check --diff
+      - run: uvx ruff@0.17.4 format --diff
 
   tests:
     runs-on: ubuntu-latest
@@ -31,19 +31,23 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.12.1"
+          version: "0.13.7"
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - run: uv run pytest
 
-  pyright:
+  ty:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.12.1"
+          version: "0.13.7"
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
-      - run: uv run pyright
+      - run: uv run ty check

@@ -9,7 +9,7 @@ format:
 
 .PHONY: type
 type:
-	uv run pyright
+	uv run ty check
 
 .PHONY: check
 check: format type
