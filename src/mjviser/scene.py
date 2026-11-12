@@ -6,6 +6,7 @@ import dataclasses
 from collections import defaultdict
 from collections.abc import Callable
 from threading import RLock
+from typing import Literal
 
 import mujoco
 import numpy as np
@@ -54,7 +55,8 @@ _FRAME_MODES: dict[str, int] = {
 # Visualization flag commands: (label, hotkey, flag). Hotkeys match MuJoCo's
 # simulate. None means MuJoCo's key is one viser reserves for camera movement
 # (W/A/S/D/Q/E), so the command is only reachable from the command palette.
-_VIS_FLAG_COMMANDS: list[tuple[str, str | None, int]] = [
+_VisKey = Literal["C", "F", "P", "J", "I", "V", "M", "U"]
+_VIS_FLAG_COMMANDS: list[tuple[str, _VisKey | None, int]] = [
   ("Contact Point", "C", int(mujoco.mjtVisFlag.mjVIS_CONTACTPOINT)),
   ("Contact Force", "F", int(mujoco.mjtVisFlag.mjVIS_CONTACTFORCE)),
   ("Contact Split", "P", int(mujoco.mjtVisFlag.mjVIS_CONTACTSPLIT)),
@@ -66,6 +68,15 @@ _VIS_FLAG_COMMANDS: list[tuple[str, str | None, int]] = [
   ("Equality", None, int(mujoco.mjtVisFlag.mjVIS_CONSTRAINT)),  # MuJoCo: E
   ("Auto Connect", None, int(mujoco.mjtVisFlag.mjVIS_AUTOCONNECT)),  # MuJoCo: A
 ]
+
+_GEOM_GROUP_KEYS: tuple[Literal["0", "1", "2", "3", "4", "5"], ...] = (
+  "0",
+  "1",
+  "2",
+  "3",
+  "4",
+  "5",
+)
 
 # Geom type constants (avoid repeated int() casts).
 _CYLINDER = int(mjtGeom.mjGEOM_CYLINDER)
@@ -934,11 +945,11 @@ class ViserMujocoScene:
     """Register single-letter keyboard shortcuts for visualization toggles."""
     server = self.server
     for label, key, flag_idx in _VIS_FLAG_COMMANDS:
-      cmd = server.gui.add_command(f"Toggle {label}", hotkey=key)  # type: ignore[arg-type]
+      cmd = server.gui.add_command(f"Toggle {label}", hotkey=key)
       cmd.on_trigger(lambda _, _idx=flag_idx: self._toggle_vis_flag(_idx))
 
-    for i in range(6):
-      cmd = server.gui.add_command(f"Toggle Geom Group {i}", hotkey=str(i))  # type: ignore[arg-type]
+    for i, key in enumerate(_GEOM_GROUP_KEYS):
+      cmd = server.gui.add_command(f"Toggle Geom Group {i}", hotkey=key)
       cmd.on_trigger(
         lambda _, _idx=i: self._toggle_group(self._geom_group_checkboxes, _idx)
       )

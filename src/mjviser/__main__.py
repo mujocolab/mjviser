@@ -27,7 +27,7 @@ def _pick(prompt: str, options: list[str]) -> int:
 def _resolve_from_robot_descriptions(name: str) -> Path | None:
   """Try to resolve a model name via the robot_descriptions package."""
   try:
-    from robot_descriptions import DESCRIPTIONS  # type: ignore[import-not-found]
+    from robot_descriptions import DESCRIPTIONS  # ty: ignore[import-not-found]
   except ImportError:
     return None
 

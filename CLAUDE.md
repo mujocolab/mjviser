@@ -4,7 +4,7 @@
 
 ```sh
 make format     # Format and lint (ruff)
-make type       # Type check (pyright)
+make type       # Type check (ty)
 make check      # make format && make type
 make test       # Run tests
 ```

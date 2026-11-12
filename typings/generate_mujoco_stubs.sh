@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Generate type stubs for MuJoCo using pybind11-stubgen
-# This helps suppress pyright errors for MuJoCo's C++ bindings
+# This helps suppress ty errors for MuJoCo's C++ bindings
 
 set -e
 
@@ -17,5 +17,5 @@ uv run pybind11-stubgen mujoco.viewer -o "$SCRIPT_DIR" --ignore-all-errors
 echo "MuJoCo stubs generated successfully in $SCRIPT_DIR/mujoco/"
 echo ""
 echo "Make sure your pyproject.toml includes:"
-echo "  [tool.pyright]"
-echo "  stubPath = \"typings\""
+echo "  [tool.ty.environment]"
+echo "  extra-paths = [\"typings\"]"
